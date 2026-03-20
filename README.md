@@ -62,11 +62,14 @@ The goal is to track the upstream main branch while maintaining a native Windows
 - Child process exit notification
 - Toggle window decorations (hide/show title bar)
 
-- Tabs (Ctrl+Shift+T opens new window; tab bar UI planned)
+- Tabbed windows with custom GDI tab bar (Ctrl+Shift+T to open, Ctrl+Shift+W to close)
+  - Active tab highlight with blue accent line, close buttons, hover effects
+  - New-tab (+) button, click to switch tabs, Ctrl+Shift+PgUp/PgDn navigation
+  - Tab titles from shell, `window-new-tab-position` and `window-show-tab-bar` configs
 
 ### Not Yet Implemented
 
-- Tab bar UI (currently tabs open as separate windows)
+- Tab drag reorder, tab context menu, tab colors
 - Splits
 - Release build + installer (MSI/MSIX)
 
@@ -124,8 +127,9 @@ The Windows port adds a `win32` application runtime (`src/apprt/win32/`) alongsi
 
 ```
 src/apprt/win32/
-  App.zig       — Win32 message loop, window class, action dispatch
-  Surface.zig   — HWND wrapper, WGL context, input translation, clipboard
+  App.zig       — Win32 message loop, window classes, action dispatch
+  Window.zig    — Top-level container HWND, tab bar, tab lifecycle
+  Surface.zig   — WS_CHILD HWND, WGL context, input translation, clipboard
   win32.zig     — Win32 API type definitions and extern declarations
 
 src/shell-integration/powershell/
@@ -140,7 +144,13 @@ A test harness runs from WSL2 using PowerShell automation:
 bash test/win32/ghostty_test.sh all
 ```
 
-Tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config file loading, scrollbar, close confirmation, URL detection, and desktop notifications.
+Tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config file loading, scrollbar, close confirmation, URL detection, desktop notifications, and tabs.
+
+Tab-specific tests run in a single PowerShell session (required for WSL2 desktop isolation):
+
+```bash
+powershell.exe -ExecutionPolicy Bypass -File test/win32/test_tabs.ps1 -ExePath path\to\ghostty.exe
+```
 
 ## Syncing with Upstream
 
