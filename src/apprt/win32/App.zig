@@ -12,6 +12,7 @@ const CoreSurface = @import("../../Surface.zig");
 const internal_os = @import("../../os/main.zig");
 
 const Surface = @import("Surface.zig");
+const Window = @import("Window.zig");
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -26,8 +27,14 @@ const WM_APP_WAKEUP: u32 = w32.WM_APP + 1;
 /// Timer ID for the quit-after-last-window-closed delay.
 const QUIT_TIMER_ID: usize = 1;
 
-/// The Win32 window class name (wide string).
-const CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
+/// Window class for the top-level container (GDI painting, no CS_OWNDC).
+pub const WINDOW_CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
+
+/// Window class for terminal surfaces (OpenGL via WGL, needs CS_OWNDC).
+pub const TERMINAL_CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyTerminal");
+
+/// Window class for the message-only HWND (WM_APP_WAKEUP, WM_TIMER).
+pub const MSG_CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyMsg");
 
 /// The core application.
 core_app: *CoreApp,
@@ -43,8 +50,13 @@ msg_hwnd: ?w32.HWND = null,
 /// The HINSTANCE for this module.
 hinstance: w32.HINSTANCE,
 
-/// Window class atom from RegisterClassExW.
+/// Window class atoms from RegisterClassExW.
 class_atom: u16 = 0,
+terminal_class_atom: u16 = 0,
+msg_class_atom: u16 = 0,
+
+/// List of active Window containers (tabbed windows).
+windows: std.ArrayList(*Window) = .empty,
 
 /// Background brush created from the configured background color.
 /// Used by WM_ERASEBKGND to fill exposed areas during resize,
@@ -97,11 +109,11 @@ pub fn init(
         .bg_brush = bg_brush,
     };
 
-    // Register the window class
+    // Register the window container class (GDI painting, no CS_OWNDC).
     const wc = w32.WNDCLASSEXW{
         .cbSize = @sizeOf(w32.WNDCLASSEXW),
-        .style = w32.CS_OWNDC,
-        .lpfnWndProc = &wndProc,
+        .style = 0,
+        .lpfnWndProc = &Window.windowWndProc,
         .cbClsExtra = 0,
         .cbWndExtra = 0,
         .hInstance = hinstance,
@@ -109,18 +121,65 @@ pub fn init(
         .hCursor = w32.LoadCursorW(null, w32.IDC_ARROW),
         .hbrBackground = bg_brush,
         .lpszMenuName = null,
-        .lpszClassName = CLASS_NAME,
+        .lpszClassName = WINDOW_CLASS_NAME,
         .hIconSm = null,
     };
 
     self.class_atom = w32.RegisterClassExW(&wc);
     if (self.class_atom == 0) return error.Win32Error;
+    errdefer if (self.class_atom != 0) {
+        _ = w32.UnregisterClassW(WINDOW_CLASS_NAME, self.hinstance);
+    };
+
+    // Register the terminal surface class (OpenGL via WGL, needs CS_OWNDC).
+    const tc = w32.WNDCLASSEXW{
+        .cbSize = @sizeOf(w32.WNDCLASSEXW),
+        .style = w32.CS_OWNDC,
+        .lpfnWndProc = &surfaceWndProc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = hinstance,
+        .hIcon = null,
+        .hCursor = w32.LoadCursorW(null, w32.IDC_ARROW),
+        .hbrBackground = null,
+        .lpszMenuName = null,
+        .lpszClassName = TERMINAL_CLASS_NAME,
+        .hIconSm = null,
+    };
+
+    self.terminal_class_atom = w32.RegisterClassExW(&tc);
+    if (self.terminal_class_atom == 0) return error.Win32Error;
+    errdefer if (self.terminal_class_atom != 0) {
+        _ = w32.UnregisterClassW(TERMINAL_CLASS_NAME, self.hinstance);
+    };
+
+    // Register the message-only window class (WM_APP_WAKEUP, WM_TIMER).
+    const mc = w32.WNDCLASSEXW{
+        .cbSize = @sizeOf(w32.WNDCLASSEXW),
+        .style = 0,
+        .lpfnWndProc = &msgWndProc,
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = hinstance,
+        .hIcon = null,
+        .hCursor = null,
+        .hbrBackground = null,
+        .lpszMenuName = null,
+        .lpszClassName = MSG_CLASS_NAME,
+        .hIconSm = null,
+    };
+
+    self.msg_class_atom = w32.RegisterClassExW(&mc);
+    if (self.msg_class_atom == 0) return error.Win32Error;
+    errdefer if (self.msg_class_atom != 0) {
+        _ = w32.UnregisterClassW(MSG_CLASS_NAME, self.hinstance);
+    };
 
     // Create a message-only window for receiving WM_APP_WAKEUP.
     // HWND_MESSAGE makes it a message-only window (invisible, no rendering).
     self.msg_hwnd = w32.CreateWindowExW(
         0,
-        CLASS_NAME,
+        MSG_CLASS_NAME,
         std.unicode.utf8ToUtf16LeStringLiteral("GhosttyMsg"),
         0, // no style needed
         0,
@@ -134,24 +193,34 @@ pub fn init(
     );
     if (self.msg_hwnd == null) return error.Win32Error;
 
-    // Store self pointer in msg_hwnd's GWLP_USERDATA for wndProc access
+    // Store self pointer in msg_hwnd's GWLP_USERDATA for msgWndProc access
     _ = w32.SetWindowLongPtrW(self.msg_hwnd.?, w32.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
 }
 
 pub fn run(self: *App) !void {
-    // Create the initial window (heap-allocated because renderer/IO
-    // threads hold references to the surface).
+    // Create the initial Window container with one tab.
     const alloc = self.core_app.alloc;
-    const initial_surface = try alloc.create(Surface);
-    errdefer alloc.destroy(initial_surface);
-    try initial_surface.init(self);
+    const window = try alloc.create(Window);
+    errdefer alloc.destroy(window);
+    try window.init(self);
+    try self.windows.append(alloc, window);
+    _ = try window.addTab();
 
     // Enter the Win32 message loop
     var msg: w32.MSG = undefined;
-    while (!self.quit_requested) {
+    while (true) {
         const result = w32.GetMessageW(&msg, null, 0, 0);
-        if (result == 0) break; // WM_QUIT
+        if (result == 0) {
+            // WM_QUIT received. Check if it's still wanted — stopQuitTimer()
+            // resets quit_requested if a new surface opened after
+            // PostQuitMessage was called (e.g. during startup).
+            // GetMessageW consumes the quit flag, so the next call will
+            // block normally for real messages.
+            if (!self.quit_requested) continue;
+            break;
+        }
         if (result < 0) return error.Win32Error;
+        if (self.quit_requested) break;
 
         // Intercept keystrokes destined for the search edit control so
         // Enter/Escape can navigate matches or close the search bar.
@@ -179,20 +248,38 @@ pub fn terminate(self: *App) void {
     self.stopQuitTimer();
 
     if (self.msg_hwnd) |hwnd| {
-        // Clear GWLP_USERDATA before destroying. The msg_hwnd stores
-        // *App in userdata, but wndProc tries to cast non-zero userdata
-        // to *Surface for non-WM_APP_WAKEUP messages (like WM_DESTROY).
-        // The alignment of *App differs from *Surface, causing a panic
-        // in @ptrFromInt. Clearing to 0 makes wndProc fall through to
-        // DefWindowProc for any messages during destruction.
+        // Clear GWLP_USERDATA before destroying so msgWndProc sees
+        // userdata=0 and falls through to DefWindowProc for any
+        // messages during destruction (e.g. WM_DESTROY).
         _ = w32.SetWindowLongPtrW(hwnd, w32.GWLP_USERDATA, 0);
         _ = w32.DestroyWindow(hwnd);
         self.msg_hwnd = null;
     }
 
+    // Deinit and free all Window containers.
+    const alloc = self.core_app.alloc;
+    for (self.windows.items) |window| {
+        window.deinit();
+        alloc.destroy(window);
+    }
+    self.windows.deinit(alloc);
+
     if (self.bg_brush) |brush| {
         _ = w32.DeleteObject(@ptrCast(brush));
         self.bg_brush = null;
+    }
+
+    if (self.msg_class_atom != 0) {
+        _ = w32.UnregisterClassW(MSG_CLASS_NAME, self.hinstance);
+        self.msg_class_atom = 0;
+    }
+    if (self.terminal_class_atom != 0) {
+        _ = w32.UnregisterClassW(TERMINAL_CLASS_NAME, self.hinstance);
+        self.terminal_class_atom = 0;
+    }
+    if (self.class_atom != 0) {
+        _ = w32.UnregisterClassW(WINDOW_CLASS_NAME, self.hinstance);
+        self.class_atom = 0;
     }
 
     self.config.deinit();
@@ -231,13 +318,23 @@ pub fn performAction(
 
         .new_window => {
             const alloc = self.core_app.alloc;
-            const surface = alloc.create(Surface) catch |err| {
-                log.err("failed to allocate new surface err={}", .{err});
+            const window = alloc.create(Window) catch |err| {
+                log.err("failed to allocate new window err={}", .{err});
                 return true;
             };
-            surface.init(self) catch |err| {
-                log.err("failed to create new window err={}", .{err});
-                alloc.destroy(surface);
+            window.init(self) catch |err| {
+                log.err("failed to init new window err={}", .{err});
+                alloc.destroy(window);
+                return true;
+            };
+            self.windows.append(alloc, window) catch |err| {
+                log.err("failed to track new window err={}", .{err});
+                window.deinit();
+                alloc.destroy(window);
+                return true;
+            };
+            _ = window.addTab() catch |err| {
+                log.err("failed to add tab to new window err={}", .{err});
                 return true;
             };
             return true;
@@ -299,7 +396,7 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    if (core_surface.rt_surface.hwnd) |hwnd| {
+                    if (core_surface.rt_surface.parent_window.hwnd) |hwnd| {
                         if (w32.IsZoomed(hwnd) != 0) {
                             _ = w32.ShowWindow(hwnd, w32.SW_RESTORE);
                         } else {
@@ -315,7 +412,8 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    core_surface.rt_surface.close(false);
+                    // Close the entire window (all tabs), not just one tab.
+                    core_surface.rt_surface.parent_window.close();
                 },
             }
             return true;
@@ -427,19 +525,16 @@ pub fn performAction(
         },
 
         .new_tab => {
-            // For now, open a new window. Proper tabbed UI with a tab
-            // bar is a future enhancement — this gives the Ctrl+Shift+T
-            // keybinding immediate functionality.
-            const alloc = self.core_app.alloc;
-            const surface = alloc.create(Surface) catch |err| {
-                log.err("failed to allocate new tab surface err={}", .{err});
-                return true;
-            };
-            surface.init(self) catch |err| {
-                log.err("failed to create new tab err={}", .{err});
-                alloc.destroy(surface);
-                return true;
-            };
+            // Add a new tab to the parent window of the focused surface.
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    const parent = core_surface.rt_surface.parent_window;
+                    _ = parent.addTab() catch |err| {
+                        log.err("failed to add new tab err={}", .{err});
+                    };
+                },
+            }
             return true;
         },
 
@@ -454,8 +549,31 @@ pub fn performAction(
             return true;
         },
 
-        .goto_tab, .move_tab, .set_tab_title, .toggle_tab_overview => {
-            // Acknowledge but no-op until proper tab bar UI is implemented.
+        .goto_tab => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    _ = core_surface.rt_surface.parent_window.selectTab(value);
+                },
+            }
+            return true;
+        },
+
+        .set_tab_title => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.onTabTitleChanged(
+                        core_surface.rt_surface,
+                        value.title,
+                    );
+                },
+            }
+            return true;
+        },
+
+        .move_tab, .toggle_tab_overview => {
+            // Acknowledge but no-op until further UI is implemented.
             return true;
         },
 
@@ -463,7 +581,7 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    if (core_surface.rt_surface.hwnd) |h| {
+                    if (core_surface.rt_surface.parent_window.hwnd) |h| {
                         // Convert client size to window size (accounts for
                         // title bar, borders, scrollbar).
                         var rect = w32.RECT{
@@ -480,7 +598,7 @@ pub fn performAction(
                             0,
                             rect.right - rect.left,
                             rect.bottom - rect.top,
-                            w32.SWP_NOZORDER | 0x0002, // SWP_NOMOVE
+                            w32.SWP_NOZORDER | w32.SWP_NOMOVE,
                         );
                     }
                 },
@@ -518,7 +636,7 @@ pub fn performAction(
                     const exit_code = value.exit_code;
                     if (exit_code != 0) {
                         // Show a message box for abnormal exit
-                        const hwnd_val = core_surface.rt_surface.hwnd;
+                        const hwnd_val = core_surface.rt_surface.parent_window.hwnd;
                         var buf: [256]u16 = undefined;
                         const msg_text = std.fmt.bufPrint(
                             @as([]u8, @ptrCast(&buf)),
@@ -561,7 +679,7 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    if (core_surface.rt_surface.hwnd) |h| {
+                    if (core_surface.rt_surface.parent_window.hwnd) |h| {
                         const current_ex = w32.GetWindowLongW(h, w32.GWL_EXSTYLE);
                         if (current_ex & w32.WS_EX_LAYERED != 0) {
                             // Remove layered style (restore full opacity)
@@ -588,7 +706,7 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    if (core_surface.rt_surface.hwnd) |h| {
+                    if (core_surface.rt_surface.parent_window.hwnd) |h| {
                         // Reset to default 800x600
                         var rect = w32.RECT{
                             .left = 0, .top = 0,
@@ -599,7 +717,7 @@ pub fn performAction(
                             h, null, 0, 0,
                             rect.right - rect.left,
                             rect.bottom - rect.top,
-                            w32.SWP_NOZORDER | 0x0002, // SWP_NOMOVE
+                            w32.SWP_NOZORDER | w32.SWP_NOMOVE,
                         );
                     }
                 },
@@ -611,7 +729,7 @@ pub fn performAction(
             switch (target) {
                 .app => {},
                 .surface => |core_surface| {
-                    if (core_surface.rt_surface.hwnd) |h| {
+                    if (core_surface.rt_surface.parent_window.hwnd) |h| {
                         // Get the window title and put it on the clipboard
                         var wbuf: [512]u16 = undefined;
                         const wlen: usize = @intCast(w32.GetWindowTextW(h, &wbuf, @intCast(wbuf.len)));
@@ -673,7 +791,7 @@ pub fn performAction(
 }
 
 /// Start the quit timer. Called when the last surface closes.
-fn startQuitTimer(self: *App) void {
+pub fn startQuitTimer(self: *App) void {
     // Cancel any existing timer first.
     self.stopQuitTimer();
 
@@ -696,10 +814,21 @@ fn startQuitTimer(self: *App) void {
 }
 
 /// Cancel the quit timer. Called when a new surface opens.
-fn stopQuitTimer(self: *App) void {
+pub fn stopQuitTimer(self: *App) void {
     switch (self.quit_timer_state) {
         .off => {},
-        .expired => self.quit_timer_state = .off,
+        .expired => {
+            self.quit_timer_state = .off;
+            // Reset quit_requested. The WM_QUIT posted by startQuitTimer's
+            // no-delay path can't be removed from the queue (it's a flag,
+            // not a real message). Instead, the message loop checks
+            // quit_requested when GetMessageW returns 0 — if false, it
+            // ignores the spurious WM_QUIT and continues. This handles
+            // the normal startup sequence: main_ghostty calls
+            // startQuitTimer() before any surfaces exist, then run()
+            // creates the first surface which triggers stopQuitTimer().
+            self.quit_requested = false;
+        },
         .active => {
             if (self.msg_hwnd) |hwnd| {
                 _ = w32.KillTimer(hwnd, QUIT_TIMER_ID);
@@ -755,61 +884,6 @@ fn showDesktopNotification(
     _ = w32.SetTimer(hwnd, 2, 6000, null);
 }
 
-/// Create a new visible window. This is called by Surface.init and
-/// by performAction(.new_window).
-pub fn createWindow(self: *App) !w32.HWND {
-    const hwnd = w32.CreateWindowExW(
-        0,
-        CLASS_NAME,
-        std.unicode.utf8ToUtf16LeStringLiteral("Ghostty"),
-        w32.WS_OVERLAPPEDWINDOW,
-        w32.CW_USEDEFAULT,
-        w32.CW_USEDEFAULT,
-        800,
-        600,
-        null,
-        null,
-        self.hinstance,
-        null,
-    ) orelse return error.Win32Error;
-
-    // Enable dark mode window chrome so the title bar and frame match
-    // the terminal's dark background. This also prevents the bright
-    // white resize border that would otherwise flash during resize.
-    // Supported on Windows 10 build 18985+ and Windows 11.
-    const dark_mode: u32 = 1; // TRUE
-    _ = w32.DwmSetWindowAttribute(
-        hwnd,
-        w32.DWMWA_USE_IMMERSIVE_DARK_MODE,
-        @ptrCast(&dark_mode),
-        @sizeOf(u32),
-    );
-
-    // Apply dark theme to common controls (scrollbar, etc.) so they
-    // match the dark title bar instead of being bright white.
-    _ = w32.SetWindowTheme(
-        hwnd,
-        std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer"),
-        null,
-    );
-
-    // If background opacity is less than 1.0, make the window
-    // transparent using the layered window API. This applies uniform
-    // alpha to the entire window (including text), but is the only
-    // reliable approach with legacy OpenGL/WGL contexts.
-    if (self.config.@"background-opacity" < 1.0) {
-        const current_ex = w32.GetWindowLongW(hwnd, w32.GWL_EXSTYLE);
-        _ = w32.SetWindowLongW(hwnd, w32.GWL_EXSTYLE, current_ex | w32.WS_EX_LAYERED);
-        const alpha: u8 = @intFromFloat(@round(self.config.@"background-opacity" * 255.0));
-        _ = w32.SetLayeredWindowAttributes(hwnd, 0, alpha, w32.LWA_ALPHA);
-    }
-
-    _ = w32.ShowWindow(hwnd, w32.SW_SHOW);
-    _ = w32.UpdateWindow(hwnd);
-
-    return hwnd;
-}
-
 /// Notify the core app of a tick.
 fn tick(self: *App) void {
     self.core_app.tick(self) catch |err| {
@@ -817,60 +891,21 @@ fn tick(self: *App) void {
     };
 }
 
-/// The Win32 window procedure. Routes messages to the appropriate Surface
-/// or handles app-level messages.
-fn wndProc(
+/// Window procedure for terminal surface child HWNDs (GhosttyTerminal class).
+/// GWLP_USERDATA stores a *Surface pointer.
+fn surfaceWndProc(
     hwnd: w32.HWND,
     msg: u32,
     wparam: usize,
     lparam: isize,
 ) callconv(.c) isize {
-    // GWLP_USERDATA stores either an *App (message-only window) or
-    // *Surface (visible windows). We disambiguate by checking the message:
-    // WM_APP_WAKEUP only goes to the message-only window.
     const userdata = w32.GetWindowLongPtrW(hwnd, w32.GWLP_USERDATA);
-
-    // Handle app-level messages (message-only window, userdata is *App).
-    if (msg == WM_APP_WAKEUP) {
-        if (userdata != 0) {
-            const app: *App = @ptrFromInt(@as(usize, @bitCast(userdata)));
-            app.tick();
-        }
-        return 0;
-    }
-
-    if (msg == w32.WM_TIMER and wparam == QUIT_TIMER_ID) {
-        if (userdata != 0) {
-            const app: *App = @ptrFromInt(@as(usize, @bitCast(userdata)));
-            _ = w32.KillTimer(hwnd, QUIT_TIMER_ID);
-            app.quit_timer_state = .expired;
-            app.quit_requested = true;
-            w32.PostQuitMessage(0);
-        }
-        return 0;
-    }
-
-    // Timer ID 2: remove the notification tray icon after balloon timeout.
-    if (msg == w32.WM_TIMER and wparam == 2) {
-        _ = w32.KillTimer(hwnd, 2);
-        var nid: w32.NOTIFYICONDATAW = std.mem.zeroes(w32.NOTIFYICONDATAW);
-        nid.cbSize = @sizeOf(w32.NOTIFYICONDATAW);
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        _ = w32.Shell_NotifyIconW(w32.NIM_DELETE, &nid);
-        return 0;
-    }
-
-    // All other messages are for visible (surface) windows.
-    // If userdata is 0 (during creation) or this is a non-surface window,
-    // fall through to DefWindowProc.
     const surface: *Surface = if (userdata != 0)
         @ptrFromInt(@as(usize, @bitCast(userdata)))
     else
         return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
     // Guard: verify this is a surface window or its search popup.
-    // The msg-only window can receive WM_DESTROY during shutdown.
     const is_surface_window = surface.hwnd != null and surface.hwnd.? == hwnd;
     const is_search_popup = surface.search_hwnd != null and surface.search_hwnd.? == hwnd;
     if (!is_surface_window and !is_search_popup)
@@ -895,37 +930,20 @@ fn wndProc(
         },
 
         w32.WM_CLOSE => {
-            // If wparam=1 (set by Surface.close when process_active=true),
-            // show a confirmation dialog. For the X button (wparam=0), we
-            // don't call needsConfirmQuit() because without shell integration
-            // (common on Windows with cmd.exe), it always returns true since
-            // cursorIsAtPrompt() can't detect prompt state without OSC 133.
-            const needs_confirm = wparam == 1;
-
-            if (needs_confirm) {
-                const result = w32.MessageBoxW(
-                    hwnd,
-                    std.unicode.utf8ToUtf16LeStringLiteral(
-                        "A process is still running in this terminal.\r\nClose anyway?",
-                    ),
-                    std.unicode.utf8ToUtf16LeStringLiteral("Ghostty"),
-                    w32.MB_YESNO | w32.MB_ICONWARNING | w32.MB_DEFBUTTON2,
-                );
-                if (result != w32.IDYES) return 0;
-            }
-
-            // Destroy the window. This is safe here because WM_CLOSE is
-            // dispatched from the message loop (not from inside a
-            // core_surface callback), so no code holds a reference to
-            // the surface that would be invalidated.
-            if (surface.hwnd) |h| {
-                _ = w32.DestroyWindow(h);
-            }
+            // Posted by Surface.close() to defer destruction to the
+            // message loop. This is the safe place to call closeTab
+            // (outside of core_surface callbacks).
+            surface.parent_window.closeTab(surface);
             return 0;
         },
 
         w32.WM_DESTROY => {
-            surface.handleDestroy();
+            // The child HWND is being destroyed (by Surface.deinit or
+            // parent Window destruction). Clear state so deinit()
+            // doesn't double-destroy. Lifecycle is managed by Window.
+            _ = w32.SetWindowLongPtrW(hwnd, w32.GWLP_USERDATA, 0);
+            surface.hwnd = null;
+            surface.core_surface_ready = false;
             return 0;
         },
 
@@ -1070,4 +1088,43 @@ fn wndProc(
 
         else => return w32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Window procedure for the message-only HWND (GhosttyMsg class).
+/// GWLP_USERDATA stores an *App pointer.
+fn msgWndProc(
+    hwnd: w32.HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) callconv(.c) isize {
+    const userdata = w32.GetWindowLongPtrW(hwnd, w32.GWLP_USERDATA);
+    if (userdata == 0) return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
+    const app: *App = @ptrFromInt(@as(usize, @bitCast(userdata)));
+
+    if (msg == WM_APP_WAKEUP) {
+        app.tick();
+        return 0;
+    }
+
+    if (msg == w32.WM_TIMER and wparam == QUIT_TIMER_ID) {
+        _ = w32.KillTimer(hwnd, QUIT_TIMER_ID);
+        app.quit_timer_state = .expired;
+        app.quit_requested = true;
+        w32.PostQuitMessage(0);
+        return 0;
+    }
+
+    // Timer ID 2: remove the notification tray icon after balloon timeout.
+    if (msg == w32.WM_TIMER and wparam == 2) {
+        _ = w32.KillTimer(hwnd, 2);
+        var nid: w32.NOTIFYICONDATAW = std.mem.zeroes(w32.NOTIFYICONDATAW);
+        nid.cbSize = @sizeOf(w32.NOTIFYICONDATAW);
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        _ = w32.Shell_NotifyIconW(w32.NIM_DELETE, &nid);
+        return 0;
+    }
+
+    return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
 }

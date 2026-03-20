@@ -101,6 +101,8 @@ pub const GWL_STYLE: i32 = -16;
 pub const GWL_EXSTYLE: i32 = -20;
 
 // SetWindowPos flags
+pub const SWP_NOSIZE: u32 = 0x0001;
+pub const SWP_NOMOVE: u32 = 0x0002;
 pub const SWP_NOZORDER: u32 = 0x0004;
 pub const SWP_FRAMECHANGED: u32 = 0x0020;
 
@@ -118,6 +120,7 @@ pub const MONITORINFO = extern struct {
 
 // Window messages
 pub const WM_APP: u32 = 0x8000;
+pub const WM_QUIT: u32 = 0x0012;
 pub const WM_CLOSE: u32 = 0x0010;
 pub const WM_DESTROY: u32 = 0x0002;
 pub const WM_SIZE: u32 = 0x0005;
@@ -251,9 +254,16 @@ pub const VK_OEM_7: u16 = 0xDE; // ''"' on US
 pub const WHEEL_DELTA: i16 = 120;
 
 // Show window commands
+pub const SW_HIDE: i32 = 0;
 pub const SW_SHOW: i32 = 5;
 pub const SW_MAXIMIZE: i32 = 3;
 pub const SW_RESTORE: i32 = 9;
+
+// Font weight constants
+pub const FW_NORMAL: i32 = 400;
+
+// Character set constants
+pub const DEFAULT_CHARSET: u32 = 1;
 
 // Window long pointer indices
 pub const GWLP_USERDATA: i32 = -21;
@@ -299,6 +309,11 @@ pub const IDC_APPSTARTING: usize = 32650;
 pub extern "user32" fn RegisterClassExW(
     *const WNDCLASSEXW,
 ) callconv(.c) u16;
+
+pub extern "user32" fn UnregisterClassW(
+    lpClassName: [*:0]const u16,
+    hInstance: ?HINSTANCE,
+) callconv(.c) i32;
 
 pub extern "user32" fn CreateWindowExW(
     dwExStyle: u32,
@@ -424,6 +439,12 @@ pub extern "user32" fn SetWindowTextW(
 pub extern "user32" fn ValidateRect(
     hWnd: ?HWND,
     lpRect: ?*const RECT,
+) callconv(.c) i32;
+
+pub extern "user32" fn InvalidateRect(
+    hWnd: ?HWND,
+    lpRect: ?*const RECT,
+    bErase: i32,
 ) callconv(.c) i32;
 
 pub extern "user32" fn LoadCursorW(
@@ -891,6 +912,38 @@ pub extern "dwmapi" fn DwmSetWindowAttribute(
     cbAttribute: u32,
 ) callconv(.c) i32;
 
+// -----------------------------------------------------------------------
+// GDI double-buffered painting API
+// -----------------------------------------------------------------------
+
+pub extern "gdi32" fn CreateCompatibleDC(hdc: ?HDC) callconv(.c) ?HDC;
+pub extern "gdi32" fn CreateCompatibleBitmap(hdc: HDC, cx: i32, cy: i32) callconv(.c) ?*anyopaque;
+pub extern "gdi32" fn SelectObject(hdc: HDC, h: ?*anyopaque) callconv(.c) ?*anyopaque;
+pub extern "gdi32" fn DeleteDC(hdc: HDC) callconv(.c) i32;
+pub extern "gdi32" fn BitBlt(hdcDest: HDC, x: i32, y: i32, cx: i32, cy: i32, hdcSrc: HDC, x1: i32, y1: i32, rop: u32) callconv(.c) i32;
+pub extern "gdi32" fn DrawTextW(hdc: HDC, lpchText: [*]const u16, cchText: i32, lprc: *RECT, format: u32) callconv(.c) i32;
+pub extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.c) i32;
+
+pub extern "user32" fn BeginPaint(hwnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.c) ?HDC;
+pub extern "user32" fn EndPaint(hwnd: HWND, lpPaint: *const PAINTSTRUCT) callconv(.c) i32;
+
+pub const PAINTSTRUCT = extern struct {
+    hdc: HDC,
+    fErase: i32,
+    rcPaint: RECT,
+    fRestore: i32,
+    fIncUpdate: i32,
+    rgbReserved: [32]u8,
+};
+
+pub const SRCCOPY: u32 = 0x00CC0020;
+pub const TRANSPARENT: i32 = 1;
+pub const DT_LEFT: u32 = 0;
+pub const DT_VCENTER: u32 = 4;
+pub const DT_SINGLELINE: u32 = 32;
+pub const DT_END_ELLIPSIS: u32 = 0x8000;
+pub const DT_NOPREFIX: u32 = 0x800;
+
 pub extern "gdi32" fn ChoosePixelFormat(
     hdc: HDC,
     ppfd: *const PIXELFORMATDESCRIPTOR,
@@ -917,4 +970,23 @@ pub extern "opengl32" fn wglMakeCurrent(
 
 pub extern "opengl32" fn wglDeleteContext(
     hglrc: HGLRC,
+) callconv(.c) i32;
+
+// -----------------------------------------------------------------------
+// TrackMouseEvent API (for WM_MOUSELEAVE tracking)
+// -----------------------------------------------------------------------
+
+pub const WM_MOUSELEAVE: u32 = 0x02A3;
+
+pub const TRACKMOUSEEVENT = extern struct {
+    cbSize: u32,
+    dwFlags: u32,
+    hwndTrack: HWND,
+    dwHoverTime: u32,
+};
+
+pub const TME_LEAVE: u32 = 0x00000002;
+
+pub extern "user32" fn TrackMouseEvent(
+    lpEventTrack: *TRACKMOUSEEVENT,
 ) callconv(.c) i32;

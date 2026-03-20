@@ -13,6 +13,7 @@ const CoreSurface = @import("../../Surface.zig");
 const internal_os = @import("../../os/main.zig");
 
 const App = @import("App.zig");
+const Window = @import("Window.zig");
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -36,6 +37,9 @@ scale: f32 = 1.0,
 
 /// The parent App.
 app: *App,
+
+/// The parent Window that contains this Surface as a tab.
+parent_window: *Window = undefined,
 
 /// The core terminal surface. Initialized by init() after creating
 /// the window and WGL context. Manages fonts, renderer, PTY, and IO.
@@ -101,26 +105,35 @@ search_edit: ?w32.HWND = null,
 /// Whether the search bar is currently visible.
 search_active: bool = false,
 
-/// Whether the window is currently in fullscreen mode.
-is_fullscreen: bool = false,
-
-/// Saved window style and placement for restoring from fullscreen.
-saved_style: u32 = 0,
-saved_rect: w32.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
-
 /// Initialize a new Surface by creating a Win32 window and WGL context,
 /// then initialize the core terminal surface (fonts, renderer, PTY, IO).
-pub fn init(self: *Surface, app: *App) !void {
+pub fn init(self: *Surface, app: *App, parent: *Window) !void {
     self.* = .{
         .app = app,
+        .parent_window = parent,
     };
 
     // Create a manual-reset event for synchronizing resize with the
     // renderer thread. Manual-reset so we control exactly when it's reset.
     self.frame_event = w32.CreateEventW(null, 1, 0, null);
 
-    // Create the window through the App
-    const hwnd = try app.createWindow();
+    // Create a WS_CHILD window inside the parent Window container.
+    const parent_hwnd = parent.hwnd orelse return error.Win32Error;
+    const sr = parent.surfaceRect();
+    const hwnd = w32.CreateWindowExW(
+        0,
+        App.TERMINAL_CLASS_NAME,
+        std.unicode.utf8ToUtf16LeStringLiteral(""),
+        w32.WS_CHILD,
+        sr.left,
+        sr.top,
+        @intCast(@max(sr.right - sr.left, 1)),
+        @intCast(@max(sr.bottom - sr.top, 1)),
+        parent_hwnd,
+        null,
+        app.hinstance,
+        null,
+    ) orelse return error.Win32Error;
     self.hwnd = hwnd;
     errdefer {
         _ = w32.DestroyWindow(hwnd);
@@ -162,6 +175,14 @@ pub fn init(self: *Surface, app: *App) !void {
         self.scale,
     });
 
+    // Show the child window before initializing the core surface.
+    // core_surface.init() spawns ConPTY + cmd.exe which needs the
+    // window to be visible and have valid dimensions. On the old
+    // top-level architecture, ShowWindow was called in createWindow()
+    // before core_surface.init(). We must preserve that order.
+    _ = w32.ShowWindow(hwnd, w32.SW_SHOW);
+    _ = w32.UpdateWindow(hwnd);
+
     // --- Core terminal surface initialization ---
     const alloc = app.core_app.alloc;
 
@@ -190,38 +211,51 @@ pub fn init(self: *Surface, app: *App) !void {
 }
 
 pub fn deinit(self: *Surface) void {
-    if (self.core_surface_initialized) {
-        // Deinit the core surface first (stops renderer/IO threads, cleans up
-        // terminal state, PTY, fonts, etc.).
-        self.core_surface.deinit();
+    log.debug("surface deinit: start addr={x}", .{@intFromPtr(self)});
 
-        // Unregister from the core app's surface list.
+    if (self.core_surface_initialized) {
+        log.debug("surface deinit: core_surface.deinit start", .{});
+        self.core_surface.deinit();
+        log.debug("surface deinit: core_surface.deinit done", .{});
+
         self.app.core_app.deleteSurface(self);
+        log.debug("surface deinit: deleteSurface done", .{});
     }
 
     if (self.frame_event) |event| {
         _ = w32.CloseHandle(event);
         self.frame_event = null;
     }
+    log.debug("surface deinit: frame_event closed", .{});
 
     if (self.hglrc) |hglrc| {
-        // Ensure the context is not current before deleting
+        log.debug("surface deinit: wglMakeCurrent(null)", .{});
         _ = w32.wglMakeCurrent(null, null);
+        log.debug("surface deinit: wglDeleteContext", .{});
         _ = w32.wglDeleteContext(hglrc);
         self.hglrc = null;
     }
+    log.debug("surface deinit: GL context cleaned up", .{});
 
     if (self.hdc) |hdc| {
         if (self.hwnd) |hwnd| {
+            log.debug("surface deinit: ReleaseDC", .{});
             _ = w32.ReleaseDC(hwnd, hdc);
         }
         self.hdc = null;
     }
+    log.debug("surface deinit: DC released", .{});
 
+    // Don't call DestroyWindow on the child HWND here. The OPENGL32.dll
+    // driver hooks into window destruction and segfaults after we've already
+    // cleaned up the WGL context. The child HWND will be automatically
+    // destroyed when the parent Window HWND is destroyed by Win32.
+    // Just null the hwnd field so nothing else tries to use it.
     if (self.hwnd) |hwnd| {
-        _ = w32.DestroyWindow(hwnd);
-        self.hwnd = null;
+        _ = w32.SetWindowLongPtrW(hwnd, w32.GWLP_USERDATA, 0);
     }
+    self.hwnd = null;
+    log.debug("surface deinit: complete", .{});
 }
 
 /// Set up a pixel format suitable for OpenGL rendering.
@@ -316,23 +350,13 @@ pub fn getTitle(self: *const Surface) ?[:0]const u8 {
 }
 
 pub fn close(self: *Surface, process_active: bool) void {
-    // Post WM_CLOSE instead of calling DestroyWindow directly.
-    // close() is often called from within core_surface callbacks
-    // (e.g., keyCallback when child_exited is true). If we called
-    // DestroyWindow here, it would synchronously send WM_DESTROY,
-    // which triggers handleDestroy → deinit → free(self). Then
-    // when DestroyWindow returns, the caller is still running on
-    // freed memory (use-after-free → alignment panic).
-    //
-    // PostMessage defers destruction to after the current message
-    // dispatch completes, so all code holding references to self
-    // has finished executing by the time WM_CLOSE is processed.
-    //
-    // If a child process is still running, wparam=1 tells the
-    // WM_CLOSE handler to show a confirmation dialog.
+    log.debug("Surface.close called process_active={}", .{process_active});
+    // Defer destruction to the message loop via PostMessage.
+    // This avoids calling surface.deinit() from inside core_surface
+    // callbacks (during tick), which causes reentrancy and crashes.
+    // The WM_CLOSE handler in surfaceWndProc will call closeTab.
     if (self.hwnd) |hwnd| {
-        const confirm: usize = if (process_active) 1 else 0;
-        _ = w32.PostMessageW(hwnd, w32.WM_CLOSE, confirm, 0);
+        _ = w32.PostMessageW(hwnd, w32.WM_CLOSE, 0, 0);
     }
 }
 
@@ -488,64 +512,12 @@ pub fn defaultTermioEnv(self: *const Surface) !std.process.EnvMap {
 
 /// Set the window title. Called from performAction(.set_title).
 pub fn setTitle(self: *Surface, title: [:0]const u8) void {
-    if (self.hwnd) |hwnd| {
-        // Convert UTF-8 title to UTF-16 for Win32
-        var buf: [512]u16 = undefined;
-        const len = std.unicode.utf8ToUtf16Le(&buf, title) catch return;
-        if (len < buf.len) {
-            buf[len] = 0;
-            _ = w32.SetWindowTextW(hwnd, @ptrCast(&buf));
-        }
-    }
+    self.parent_window.onTabTitleChanged(self, title);
 }
 
-/// Toggle fullscreen mode. Saves/restores window style and placement.
+/// Toggle fullscreen mode. Delegates to the parent Window.
 pub fn toggleFullscreen(self: *Surface) void {
-    const hwnd = self.hwnd orelse return;
-
-    if (!self.is_fullscreen) {
-        // Save current style and window rect for restore.
-        self.saved_style = w32.GetWindowLongW(hwnd, w32.GWL_STYLE);
-        _ = w32.GetWindowRect(hwnd, &self.saved_rect);
-
-        // Remove decorations: keep only WS_POPUP | WS_VISIBLE.
-        const new_style = self.saved_style & ~@as(u32, w32.WS_OVERLAPPEDWINDOW) | w32.WS_POPUP;
-        _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, new_style);
-
-        // Get the monitor that contains this window and go fullscreen on it.
-        const monitor = w32.MonitorFromWindow(hwnd, w32.MONITOR_DEFAULTTONEAREST);
-        var mi: w32.MONITORINFO = undefined;
-        mi.cbSize = @sizeOf(w32.MONITORINFO);
-        if (w32.GetMonitorInfoW(monitor, &mi) != 0) {
-            _ = w32.SetWindowPos(
-                hwnd,
-                null, // HWND_TOP
-                mi.rcMonitor.left,
-                mi.rcMonitor.top,
-                mi.rcMonitor.right - mi.rcMonitor.left,
-                mi.rcMonitor.bottom - mi.rcMonitor.top,
-                w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED,
-            );
-        }
-
-        self.is_fullscreen = true;
-    } else {
-        // Restore decorations.
-        _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, self.saved_style);
-
-        // Restore position and size.
-        _ = w32.SetWindowPos(
-            hwnd,
-            null,
-            self.saved_rect.left,
-            self.saved_rect.top,
-            self.saved_rect.right - self.saved_rect.left,
-            self.saved_rect.bottom - self.saved_rect.top,
-            w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED,
-        );
-
-        self.is_fullscreen = false;
-    }
+    self.parent_window.toggleFullscreen();
 }
 
 /// Set the mouse cursor shape. Caches the handle so WM_SETCURSOR can
@@ -629,14 +601,15 @@ fn ensureSearchBar(self: *Surface) void {
     if (self.search_hwnd != null) return;
 
     // Create the popup container (no title bar, tool window so it
-    // doesn't appear in the taskbar).
+    // doesn't appear in the taskbar). Parent is the top-level Window
+    // HWND so it floats above the terminal surface.
     const popup = w32.CreateWindowExW(
         w32.WS_EX_TOOLWINDOW,
-        std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow"),
+        App.TERMINAL_CLASS_NAME,
         std.unicode.utf8ToUtf16LeStringLiteral(""),
         w32.WS_POPUP | w32.WS_BORDER,
         0, 0, 310, 32,
-        self.hwnd,
+        self.parent_window.hwnd.?,
         null,
         self.app.hinstance,
         null,
@@ -687,7 +660,7 @@ fn ensureSearchBar(self: *Surface) void {
     // can route WM_COMMAND from the edit to our surface. We use the
     // parent window's userdata (already set to *Surface).
 
-    // Set GWLP_USERDATA on the popup so the wndProc can route
+    // Set GWLP_USERDATA on the popup so surfaceWndProc can route
     // WM_COMMAND (EN_CHANGE) and WM_CTLCOLOREDIT to this Surface.
     _ = w32.SetWindowLongPtrW(popup, w32.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
 
@@ -695,10 +668,10 @@ fn ensureSearchBar(self: *Surface) void {
     self.search_edit = edit;
 }
 
-/// Position the search popup at the top-right corner of the main window.
+/// Position the search popup at the top-right corner of the parent window.
 fn positionSearchBar(self: *Surface) void {
     const popup = self.search_hwnd orelse return;
-    const hwnd = self.hwnd orelse return;
+    const hwnd = self.parent_window.hwnd orelse return;
     var rect: w32.RECT = undefined;
     if (w32.GetWindowRect(hwnd, &rect) != 0) {
         const bar_width: i32 = 310;
@@ -767,23 +740,9 @@ pub fn handleSearchKey(self: *Surface, vk: u16) bool {
 }
 
 /// Toggle window decorations (title bar + borders) on/off.
+/// Delegates to the parent Window.
 pub fn toggleWindowDecorations(self: *Surface) void {
-    const hwnd = self.hwnd orelse return;
-    const style = w32.GetWindowLongW(hwnd, w32.GWL_STYLE);
-    const has_decorations = (style & w32.WS_CAPTION) != 0;
-
-    if (has_decorations) {
-        // Remove decorations: strip caption and thick frame
-        const new_style = style & ~@as(u32, w32.WS_CAPTION | w32.WS_THICKFRAME);
-        _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, new_style);
-    } else {
-        // Restore decorations
-        const new_style = style | w32.WS_CAPTION | w32.WS_THICKFRAME;
-        _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, new_style);
-    }
-    // Force frame recalculation
-    _ = w32.SetWindowPos(hwnd, null, 0, 0, 0, 0,
-        w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED | 0x0001 | 0x0002); // NOMOVE|NOSIZE
+    self.parent_window.toggleWindowDecorations();
 }
 
 /// Update the Win32 scrollbar to reflect the terminal's scroll state.
@@ -868,7 +827,7 @@ pub fn handleVScroll(self: *Surface, wparam: usize) void {
 }
 
 // -----------------------------------------------------------------------
-// Message handlers called from App.wndProc
+// Message handlers called from App.surfaceWndProc
 // -----------------------------------------------------------------------
 
 /// Handle WM_SIZE.
@@ -915,34 +874,6 @@ pub fn handleResize(self: *Surface, width: u32, height: u32) void {
         // just wake the renderer asynchronously.
         self.core_surface.renderer_thread.wakeup.notify() catch {};
     }
-}
-
-/// Handle WM_DESTROY.
-pub fn handleDestroy(self: *Surface) void {
-    // The window is already being destroyed at this point.
-    // Clear the hwnd so deinit() doesn't try to destroy it again.
-    const hwnd = self.hwnd;
-    self.hwnd = null;
-
-    // Prevent any further message handlers from touching core_surface
-    // during teardown. Messages can arrive during DestroyWindow and
-    // deinit (e.g. WM_SETFOCUS, WM_SIZE from style changes).
-    self.core_surface_ready = false;
-
-    // Clear GWLP_USERDATA BEFORE freeing, so any subsequent messages
-    // (WM_NCDESTROY etc.) see userdata=0 and go to DefWindowProc.
-    if (hwnd) |h| {
-        _ = w32.SetWindowLongPtrW(h, w32.GWLP_USERDATA, 0);
-    }
-
-    // Grab the allocator and app pointer before deinit clears them.
-    const alloc = self.app.core_app.alloc;
-
-    // Deinit the surface (core surface, WGL, etc.)
-    self.deinit();
-
-    // Free the heap-allocated Surface.
-    alloc.destroy(self);
 }
 
 /// Handle WM_DPICHANGED.
