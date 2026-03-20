@@ -45,11 +45,12 @@
  *
  * Complete working examples:
  * - @ref c-vt/src/main.c - OSC parser example
- * - @ref c-vt-key-encode/src/main.c - Key encoding example
- * - @ref c-vt-mouse-encode/src/main.c - Mouse encoding example
+ * - @ref c-vt-encode-key/src/main.c - Key encoding example
+ * - @ref c-vt-encode-mouse/src/main.c - Mouse encoding example
  * - @ref c-vt-paste/src/main.c - Paste safety check example
  * - @ref c-vt-sgr/src/main.c - SGR parser example
  * - @ref c-vt-formatter/src/main.c - Terminal formatter example
+ * - @ref c-vt-grid-traverse/src/main.c - Grid traversal example using grid refs
  *
  */
 
@@ -58,12 +59,12 @@
  * extract command information, and retrieve command-specific data like window titles.
  */
 
-/** @example c-vt-key-encode/src/main.c
+/** @example c-vt-encode-key/src/main.c
  * This example demonstrates how to use the key encoder to convert key events
  * into terminal escape sequences using the Kitty keyboard protocol.
  */
 
-/** @example c-vt-mouse-encode/src/main.c
+/** @example c-vt-encode-mouse/src/main.c
  * This example demonstrates how to use the mouse encoder to convert mouse events
  * into terminal escape sequences using the SGR mouse format.
  */
@@ -84,6 +85,11 @@
  * contents as plain text.
  */
 
+/** @example c-vt-grid-traverse/src/main.c
+ * This example demonstrates how to traverse the entire terminal grid using
+ * grid refs to inspect cell codepoints, row wrap state, and cell styles.
+ */
+
 #ifndef GHOSTTY_VT_H
 #define GHOSTTY_VT_H
 
@@ -96,12 +102,15 @@ extern "C" {
 #include <ghostty/vt/focus.h>
 #include <ghostty/vt/formatter.h>
 #include <ghostty/vt/terminal.h>
+#include <ghostty/vt/grid_ref.h>
 #include <ghostty/vt/osc.h>
 #include <ghostty/vt/sgr.h>
+#include <ghostty/vt/style.h>
 #include <ghostty/vt/key.h>
 #include <ghostty/vt/modes.h>
 #include <ghostty/vt/mouse.h>
 #include <ghostty/vt/paste.h>
+#include <ghostty/vt/screen.h>
 #include <ghostty/vt/size_report.h>
 #include <ghostty/vt/wasm.h>
 
