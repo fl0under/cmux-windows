@@ -1154,7 +1154,13 @@ fn surfaceWndProc(
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
 
-        w32.WM_SETFOCUS => { surface.handleFocus(true); return 0; },
+        w32.WM_SETFOCUS => {
+            // Update the active surface for this tab when a split pane gains focus.
+            const tab = surface.parent_window.active_tab;
+            surface.parent_window.tab_active_surface[tab] = surface;
+            surface.handleFocus(true);
+            return 0;
+        },
         w32.WM_KILLFOCUS => { surface.handleFocus(false); return 0; },
 
         else => return w32.DefWindowProcW(hwnd, msg, wparam, lparam),
