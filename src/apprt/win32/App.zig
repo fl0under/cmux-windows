@@ -815,6 +815,16 @@ pub fn performAction(
             return true;
         },
 
+        .goto_split => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.gotoSplit(value);
+                },
+            }
+            return true;
+        },
+
         // Return false for unhandled actions
         else => return false,
     }

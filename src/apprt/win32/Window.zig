@@ -501,6 +501,36 @@ pub fn newSplit(self: *Window, direction: SplitTree(Surface).Split.Direction) !v
     if (new_surface.hwnd) |h| _ = w32.SetFocus(h);
 }
 
+/// Navigate to a split in the given direction.
+pub fn gotoSplit(self: *Window, goto_target: apprt.action.GotoSplit) void {
+    if (self.tab_count == 0) return;
+    const alloc = self.app.core_app.alloc;
+    const tab = self.active_tab;
+    const tree = &self.tab_trees[tab];
+
+    const active_surface = self.tab_active_surface[tab];
+    const handle = self.findHandle(tab, active_surface) orelse return;
+
+    const target: SplitTree(Surface).Goto = switch (goto_target) {
+        .previous => .previous,
+        .next => .next,
+        .up => .{ .spatial = .up },
+        .down => .{ .spatial = .down },
+        .left => .{ .spatial = .left },
+        .right => .{ .spatial = .right },
+    };
+
+    const dest_handle = (tree.goto(alloc, handle, target) catch return) orelse return;
+
+    switch (tree.nodes[dest_handle.idx()]) {
+        .leaf => |surface| {
+            self.tab_active_surface[tab] = surface;
+            if (surface.hwnd) |h| _ = w32.SetFocus(h);
+        },
+        .split => {},
+    }
+}
+
 /// Navigate to a tab by GotoTab target (previous, next, last, or index).
 pub fn selectTab(self: *Window, target: apprt.action.GotoTab) bool {
     if (self.tab_count <= 1) return false;
