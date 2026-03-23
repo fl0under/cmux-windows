@@ -111,9 +111,10 @@ pub fn init(
     };
 
     // Register the window container class (GDI painting, no CS_OWNDC).
+    // CS_DBLCLKS is required to receive WM_LBUTTONDBLCLK for divider equalize.
     const wc = w32.WNDCLASSEXW{
         .cbSize = @sizeOf(w32.WNDCLASSEXW),
-        .style = 0,
+        .style = w32.CS_DBLCLKS,
         .lpfnWndProc = &Window.windowWndProc,
         .cbClsExtra = 0,
         .cbWndExtra = 0,

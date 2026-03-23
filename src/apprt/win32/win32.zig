@@ -82,6 +82,7 @@ pub const PIXELFORMATDESCRIPTOR = extern struct {
 pub const CS_HREDRAW: u32 = 0x0002;
 pub const CS_VREDRAW: u32 = 0x0001;
 pub const CS_OWNDC: u32 = 0x0020;
+pub const CS_DBLCLKS: u32 = 0x0008;
 
 // Window styles
 pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
@@ -139,6 +140,7 @@ pub const WM_SYSKEYUP: u32 = 0x0105;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
+pub const WM_LBUTTONDBLCLK: u32 = 0x0203;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
 pub const WM_MBUTTONDOWN: u32 = 0x0207;

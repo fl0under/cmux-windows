@@ -75,6 +75,12 @@ tab_font: ?*anyopaque = null,
 /// Whether WM_MOUSELEAVE tracking is active for the tab bar.
 tracking_mouse: bool = false,
 
+/// Split divider drag state.
+dragging_split: bool = false,
+drag_split_handle: SplitTree(Surface).Node.Handle = .root,
+drag_split_layout: SplitTree(Surface).Split.Layout = .horizontal,
+drag_start_rect: w32.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
+
 /// Initialize the Window by creating the top-level HWND and tab bar font.
 pub fn init(self: *Window, app: *App) !void {
     self.* = .{
@@ -509,6 +515,96 @@ fn paintDividerNode(self: *Window, hdc: w32.HDC, tree: SplitTree(Surface), handl
             }
         },
     }
+}
+
+const DividerHit = struct {
+    handle: SplitTree(Surface).Node.Handle,
+    layout: SplitTree(Surface).Split.Layout,
+};
+
+fn hitTestDivider(self: *Window, x: i32, y: i32) ?DividerHit {
+    if (self.tab_count == 0) return null;
+    const tree = self.tab_trees[self.active_tab];
+    if (!tree.isSplit()) return null;
+    if (tree.zoomed != null) return null;
+    const rect = self.surfaceRect();
+    return self.hitTestDividerNode(tree, .root, rect, x, y);
+}
+
+fn hitTestDividerNode(
+    self: *Window,
+    tree: SplitTree(Surface),
+    handle: SplitTree(Surface).Node.Handle,
+    rect: w32.RECT,
+    x: i32,
+    y: i32,
+) ?DividerHit {
+    if (handle.idx() >= tree.nodes.len) return null;
+    switch (tree.nodes[handle.idx()]) {
+        .leaf => return null,
+        .split => |s| {
+            const gap: i32 = @as(i32, @intFromFloat(@round(5.0 * self.scale)));
+            const hit_area: i32 = @max(@as(i32, @intFromFloat(@round(3.0 * self.scale))), 3);
+
+            if (s.layout == .horizontal) {
+                const total_w = rect.right - rect.left;
+                const split_x = rect.left + @as(i32, @intFromFloat(@as(f32, @floatCast(s.ratio)) * @as(f32, @floatFromInt(total_w))));
+                if (x >= split_x - hit_area and x <= split_x + hit_area and y >= rect.top and y <= rect.bottom) {
+                    return .{ .handle = handle, .layout = .horizontal };
+                }
+                const left_rect = w32.RECT{ .left = rect.left, .top = rect.top, .right = split_x - @divTrunc(gap, 2), .bottom = rect.bottom };
+                const right_rect = w32.RECT{ .left = split_x + @divTrunc(gap + 1, 2), .top = rect.top, .right = rect.right, .bottom = rect.bottom };
+                return self.hitTestDividerNode(tree, s.left, left_rect, x, y) orelse
+                    self.hitTestDividerNode(tree, s.right, right_rect, x, y);
+            } else {
+                const total_h = rect.bottom - rect.top;
+                const split_y = rect.top + @as(i32, @intFromFloat(@as(f32, @floatCast(s.ratio)) * @as(f32, @floatFromInt(total_h))));
+                if (y >= split_y - hit_area and y <= split_y + hit_area and x >= rect.left and x <= rect.right) {
+                    return .{ .handle = handle, .layout = .vertical };
+                }
+                const top_rect = w32.RECT{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = split_y - @divTrunc(gap, 2) };
+                const bottom_rect = w32.RECT{ .left = rect.left, .top = split_y + @divTrunc(gap + 1, 2), .right = rect.right, .bottom = rect.bottom };
+                return self.hitTestDividerNode(tree, s.left, top_rect, x, y) orelse
+                    self.hitTestDividerNode(tree, s.right, bottom_rect, x, y);
+            }
+        },
+    }
+}
+
+fn startDividerDrag(self: *Window, handle: SplitTree(Surface).Node.Handle, layout: SplitTree(Surface).Split.Layout) void {
+    self.dragging_split = true;
+    self.drag_split_handle = handle;
+    self.drag_split_layout = layout;
+    self.drag_start_rect = self.surfaceRect();
+    if (self.hwnd) |hwnd| _ = w32.SetCapture(hwnd);
+}
+
+fn updateDividerDrag(self: *Window, x: i32, y: i32) void {
+    if (!self.dragging_split) return;
+    const rect = self.drag_start_rect;
+    const handle = self.drag_split_handle;
+
+    const new_ratio: f16 = switch (self.drag_split_layout) {
+        .horizontal => ratio: {
+            const total: f32 = @floatFromInt(@max(rect.right - rect.left, 1));
+            const pos: f32 = @floatFromInt(x - rect.left);
+            break :ratio @floatCast(std.math.clamp(pos / total, 0.1, 0.9));
+        },
+        .vertical => ratio: {
+            const total: f32 = @floatFromInt(@max(rect.bottom - rect.top, 1));
+            const pos: f32 = @floatFromInt(y - rect.top);
+            break :ratio @floatCast(std.math.clamp(pos / total, 0.1, 0.9));
+        },
+    };
+
+    self.tab_trees[self.active_tab].resizeInPlace(handle, new_ratio);
+    self.layoutSplits();
+}
+
+fn endDividerDrag(self: *Window) void {
+    if (!self.dragging_split) return;
+    self.dragging_split = false;
+    _ = w32.ReleaseCapture();
 }
 
 /// Create a new split in the active tab.
@@ -1228,16 +1324,59 @@ pub fn windowWndProc(
         },
         w32.WM_ERASEBKGND => return 1,
         w32.WM_LBUTTONDOWN => {
-            const x: i16 = @bitCast(@as(u16, @intCast(lparam & 0xFFFF)));
-            const y: i16 = @bitCast(@as(u16, @intCast((lparam >> 16) & 0xFFFF)));
-            window.handleTabBarClick(x, y);
+            const x: i32 = @as(i16, @truncate(lparam & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
+            if (window.hitTestDivider(x, y)) |hit| {
+                window.startDividerDrag(hit.handle, hit.layout);
+                return 0;
+            }
+            if (y < window.tabBarHeight()) {
+                window.handleTabBarClick(@truncate(x), @truncate(y));
+            }
+            return 0;
+        },
+        w32.WM_LBUTTONUP => {
+            if (window.dragging_split) {
+                window.endDividerDrag();
+                return 0;
+            }
+            return 0;
+        },
+        w32.WM_LBUTTONDBLCLK => {
+            const x: i32 = @as(i16, @truncate(lparam & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
+            if (window.hitTestDivider(x, y)) |hit| {
+                window.tab_trees[window.active_tab].resizeInPlace(hit.handle, @as(f16, 0.5));
+                window.layoutSplits();
+                return 0;
+            }
             return 0;
         },
         w32.WM_MOUSEMOVE => {
-            const x: i16 = @bitCast(@as(u16, @intCast(lparam & 0xFFFF)));
-            const y: i16 = @bitCast(@as(u16, @intCast((lparam >> 16) & 0xFFFF)));
-            window.handleTabBarMouseMove(x, y);
+            const x: i32 = @as(i16, @truncate(lparam & 0xFFFF));
+            const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
+            if (window.dragging_split) {
+                window.updateDividerDrag(x, y);
+                return 0;
+            }
+            if (y < window.tabBarHeight()) {
+                window.handleTabBarMouseMove(@truncate(x), @truncate(y));
+            }
             return 0;
+        },
+        w32.WM_SETCURSOR => {
+            var pt: w32.POINT = undefined;
+            if (w32.GetCursorPos_(&pt) != 0) {
+                if (window.hwnd) |h| _ = w32.ScreenToClient(h, &pt);
+                if (window.hitTestDivider(pt.x, pt.y)) |hit| {
+                    const cursor_id: usize = if (hit.layout == .horizontal) w32.IDC_SIZEWE else w32.IDC_SIZENS;
+                    if (w32.LoadCursorW(null, cursor_id)) |cursor| {
+                        _ = w32.SetCursor(cursor);
+                    }
+                    return 1;
+                }
+            }
+            return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         w32.WM_MOUSELEAVE => {
             window.handleTabBarMouseLeave();
