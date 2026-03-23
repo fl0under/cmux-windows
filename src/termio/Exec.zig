@@ -404,9 +404,12 @@ fn termiosTimer(
 ) xev.CallbackAction {
     // log.debug("termios timer fired", .{});
 
-    // Windows ConPTY doesn't support termios mode queries.
+    // This should never happen because we guard starting our
+    // timer on windows but we want this assertion to fire if
+    // we ever do start the timer on windows.
+    // TODO: support on windows
     if (comptime builtin.os.tag == .windows) {
-        return .disarm;
+        @panic("termios timer not implemented on Windows");
     }
 
     _ = r catch |err| switch (err) {

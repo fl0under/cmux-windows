@@ -41,10 +41,9 @@ pub const Backend = enum {
         }
 
         if (target.os.tag == .windows) {
-            // Avoid fontconfig on Windows because its libxml2 dependency
-            // may not unpack due to symlinks. Use plain freetype for now
-            // which means no font discovery. Full solution would likely use
-            // DirectWrite which has its own discovery API.
+            // Use freetype for rendering on Windows. Font discovery is
+            // handled via DirectWrite in discovery.zig (see the .freetype
+            // + windows branch there).
             return .freetype;
         }
 
@@ -52,7 +51,6 @@ pub const Backend = enum {
         // that is the default. It is only used by people who want to
         // self-compile Ghostty and prefer the freetype aesthetic.
         if (target.os.tag.isDarwin()) return .coretext;
-        if (target.os.tag == .windows) return .freetype;
         return .fontconfig_freetype;
     }
 
