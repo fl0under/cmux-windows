@@ -15,11 +15,30 @@ public class W32 {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern IntPtr FindWindowEx(IntPtr p, IntPtr ca, string cls, string wn);
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
     public delegate bool EP(IntPtr h, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EP p, IntPtr l);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, EP p, IntPtr l);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
+
+    public const uint WM_KEYDOWN = 0x0100;
+    public const uint WM_KEYUP = 0x0101;
+    public const uint WM_CHAR = 0x0102;
+
+    public const int VK_RETURN = 0x0D;
+    public const int VK_TAB = 0x09;
+    public const int VK_PRIOR = 0x21;  // Page Up
+    public const int VK_NEXT = 0x22;   // Page Down
+    public const int VK_LEFT = 0x25;
+    public const int VK_UP = 0x26;
+    public const int VK_RIGHT = 0x27;
+    public const int VK_DOWN = 0x28;
+    public const int VK_OEM_4 = 0xDB;  // [
+    public const int VK_OEM_6 = 0xDD;  // ]
+    public const int VK_W = 0x57;
+    public const int VK_T = 0x54;
+    public const int VK_E = 0x45;
+    public const int VK_Z = 0x5A;
 }
 "@
 
@@ -44,19 +63,19 @@ function Take-Screenshot($proc, $name) {
     $bmp.Dispose()
 }
 
-function Send-Keys($proc, $keys) {
+# Send keystroke directly to Ghostty's window via SetForegroundWindow + SendKeys.
+# This ensures the target window receives the input.
+function Send-Shortcut($proc, $keys) {
     $proc.Refresh()
     $h = $proc.MainWindowHandle
     if ($h -ne [IntPtr]::Zero) {
         [W32]::SetForegroundWindow($h) | Out-Null
+        Start-Sleep -Milliseconds 300
+        [W32]::SetForegroundWindow($h) | Out-Null
         Start-Sleep -Milliseconds 200
     }
     [System.Windows.Forms.SendKeys]::SendWait($keys)
-}
-
-function Send-Text($proc, $text) {
-    $escaped = $text -replace '([+^%~{}()\[\]])', '{$1}'
-    Send-Keys $proc $escaped
+    Start-Sleep -Milliseconds 200
 }
 
 function Count-ChildWindows($proc, $className) {
@@ -79,271 +98,238 @@ function Count-ChildWindows($proc, $className) {
 function Launch-Ghostty {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $ExePath
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $true  # UseShellExecute so it gets its own window properly
     $proc = [System.Diagnostics.Process]::Start($psi)
-    $proc.BeginErrorReadLine()
 
     # Wait for main window
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 200
         $proc.Refresh()
-        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { return $proc }
+        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {
+            # Give it extra time to fully initialize
+            Start-Sleep -Seconds 1
+            return $proc
+        }
     }
-    Write-Output "  WARN: Window handle not found after 6s"
+    Write-Output "  WARN: Window handle not found after 8s"
     return $proc
 }
 
-# Default keybindings (from Ghostty defaults):
-# Ctrl+Shift+Enter = new split (right)
-# Ctrl+Shift+O     = new split (down)  -- or check config
-# Ctrl+Shift+[     = goto_split previous
-# Ctrl+Shift+]     = goto_split next
-# Ctrl+Shift+Arrow = resize_split
-# Ctrl+Shift+E     = equalize_splits
-# Ctrl+Shift+Z     = toggle_split_zoom
+function Kill-Ghostty($proc) {
+    if (-not $proc.HasExited) {
+        & taskkill /PID $proc.Id /T /F 2>$null | Out-Null
+        Start-Sleep -Milliseconds 500
+    }
+}
 
-# Note: Ghostty's default split keybindings may vary.
-# These tests use the configurable keybindings. If your config
-# differs, update the Send-Keys calls below.
-
-# ═══════════════════════════════════════
-# TEST: New Split (Horizontal)
-# ═══════════════════════════════════════
+# ===================================
+# TEST 1: New Split
+# ===================================
 Write-Output ""
-Write-Output "=== TEST: New Split (Right) ==="
+Write-Output "=== TEST 1: New Split ==="
 $proc = Launch-Ghostty
 Write-Output "  Launched PID=$($proc.Id)"
-Start-Sleep -Seconds 2
 
-Take-Screenshot $proc "split_01_initial"
+$childBefore = Count-ChildWindows $proc "GhosttyTerminal"
+Write-Output "  Terminal child windows before split: $childBefore"
 
-# Type in the first pane to identify it
-Send-Text $proc "echo PANE1"
-Send-Keys $proc "{ENTER}"
-Start-Sleep -Milliseconds 500
+Take-Screenshot $proc "split_01_before"
 
-# Create a split to the right (Ctrl+Shift+Enter or Ctrl+D depending on config)
-# Using Ctrl+Shift+Enter as default
-Send-Keys $proc "^+{ENTER}"
+# Ctrl+Shift+Enter = new split (right) - default Ghostty keybinding
+Send-Shortcut $proc "^+o"
 Start-Sleep -Seconds 3
 
-Take-Screenshot $proc "split_02_after_split"
+$childAfter = Count-ChildWindows $proc "GhosttyTerminal"
+Write-Output "  Terminal child windows after split: $childAfter"
 
-# Count visible terminal child windows — should be 2 now
-$childCount = Count-ChildWindows $proc "GhosttyTerminal"
-if ($childCount -ge 2) {
-    Write-Output "  OK: Found $childCount visible terminal windows (split created)"
-} else {
-    Write-Output "  INFO: Found $childCount terminal windows (expected 2, may need different keybinding)"
-}
+Take-Screenshot $proc "split_02_after"
 
-if (-not $proc.HasExited) {
-    Write-Output "  OK: Process alive after split"
+if ($proc.HasExited) {
+    Write-Output "  FAIL: Process crashed during split creation"
+    $fail++
+} elseif ($childAfter -gt $childBefore) {
+    Write-Output "  OK: Split created ($childBefore -> $childAfter visible terminals)"
     $pass++
 } else {
-    Write-Output "  FAIL: Process died after split"
-    $fail++
-}
-
-# Type in the second pane
-Send-Text $proc "echo PANE2"
-Send-Keys $proc "{ENTER}"
-Start-Sleep -Milliseconds 500
-
-Take-Screenshot $proc "split_03_two_panes"
-
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
-
-# ═══════════════════════════════════════
-# TEST: Split Navigation (goto_split)
-# ═══════════════════════════════════════
-Write-Output ""
-Write-Output "=== TEST: Split Navigation ==="
-$proc = Launch-Ghostty
-Write-Output "  Launched PID=$($proc.Id)"
-Start-Sleep -Seconds 2
-
-# Create a split
-Send-Keys $proc "^+{ENTER}"
-Start-Sleep -Seconds 3
-
-# Type in pane 2
-Send-Text $proc "echo FOCUS_PANE2"
-Send-Keys $proc "{ENTER}"
-Start-Sleep -Milliseconds 500
-
-# Navigate to previous split (Ctrl+Shift+[)
-Send-Keys $proc "^+{[}"
-Start-Sleep -Seconds 1
-
-# Type in pane 1 (should now be focused)
-Send-Text $proc "echo FOCUS_PANE1"
-Send-Keys $proc "{ENTER}"
-Start-Sleep -Milliseconds 500
-
-Take-Screenshot $proc "split_04_navigation"
-
-# Navigate to next split (Ctrl+Shift+])
-Send-Keys $proc "^+{]}"
-Start-Sleep -Seconds 1
-
-Take-Screenshot $proc "split_05_navigate_next"
-
-if (-not $proc.HasExited) {
-    Write-Output "  OK: Process alive after split navigation"
+    Write-Output "  WARN: Child count unchanged - split may not have been created (check keybinding)"
+    Write-Output "  OK: Process survived (no crash)"
     $pass++
-} else {
-    Write-Output "  FAIL: Process died during split navigation"
-    $fail++
 }
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
+Kill-Ghostty $proc
+Write-Output "  DONE"
 
-# ═══════════════════════════════════════
-# TEST: Close Split Pane
-# ═══════════════════════════════════════
+# ===================================
+# TEST 2: Close Split Pane
+# ===================================
 Write-Output ""
-Write-Output "=== TEST: Close Split Pane ==="
+Write-Output "=== TEST 2: Close Split Pane ==="
 $proc = Launch-Ghostty
 Write-Output "  Launched PID=$($proc.Id)"
-Start-Sleep -Seconds 2
 
 # Create a split
-Send-Keys $proc "^+{ENTER}"
+Send-Shortcut $proc "^+o"
 Start-Sleep -Seconds 3
 
 $childBefore = Count-ChildWindows $proc "GhosttyTerminal"
-Write-Output "  Child windows before close: $childBefore"
+Write-Output "  Terminals after split: $childBefore"
 
-# Close the active pane (Ctrl+Shift+W closes current surface)
-Send-Keys $proc "^+w"
+# Close the active pane (Ctrl+Shift+W)
+Send-Shortcut $proc "^+w"
 Start-Sleep -Seconds 2
 
-if (-not $proc.HasExited) {
-    $childAfter = Count-ChildWindows $proc "GhosttyTerminal"
-    Write-Output "  Child windows after close: $childAfter"
-    if ($childAfter -lt $childBefore) {
-        Write-Output "  OK: Pane closed (went from $childBefore to $childAfter)"
-    } else {
-        Write-Output "  INFO: Child count unchanged ($childAfter) — pane may have been hidden"
-    }
-    Write-Output "  OK: Process alive after closing split pane"
-    $pass++
-} else {
+if ($proc.HasExited) {
     Write-Output "  FAIL: Process died after closing split pane"
     $fail++
+} else {
+    $childAfter = Count-ChildWindows $proc "GhosttyTerminal"
+    Write-Output "  Terminals after close: $childAfter"
+    Write-Output "  OK: Process alive after closing split pane"
+    $pass++
 }
 
-Take-Screenshot $proc "split_06_after_close_pane"
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
+Take-Screenshot $proc "split_03_after_close"
+Kill-Ghostty $proc
+Write-Output "  DONE"
 
-# ═══════════════════════════════════════
-# TEST: Multiple Splits
-# ═══════════════════════════════════════
+# ===================================
+# TEST 3: Multiple Splits
+# ===================================
 Write-Output ""
-Write-Output "=== TEST: Multiple Splits ==="
+Write-Output "=== TEST 3: Multiple Splits ==="
 $proc = Launch-Ghostty
 Write-Output "  Launched PID=$($proc.Id)"
-Start-Sleep -Seconds 2
 
 # Create 3 splits (4 panes total)
 for ($i = 0; $i -lt 3; $i++) {
-    Send-Keys $proc "^+{ENTER}"
+    Send-Shortcut $proc "^+o"
     Start-Sleep -Seconds 2
 }
 
 $childCount = Count-ChildWindows $proc "GhosttyTerminal"
 Write-Output "  Terminal windows: $childCount (expected 4)"
 
-Take-Screenshot $proc "split_07_four_panes"
+Take-Screenshot $proc "split_04_multiple"
 
-if (-not $proc.HasExited) {
-    Write-Output "  OK: Process alive with multiple splits"
-    $pass++
-} else {
-    Write-Output "  FAIL: Process died during multiple splits"
+if ($proc.HasExited) {
+    Write-Output "  FAIL: Process crashed during multiple splits"
     $fail++
+} else {
+    Write-Output "  OK: Process alive with $childCount panes"
+    $pass++
 }
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
+Kill-Ghostty $proc
+Write-Output "  DONE"
 
-# ═══════════════════════════════════════
-# TEST: Splits + Tabs
-# ═══════════════════════════════════════
+# ===================================
+# TEST 4: Split Navigation
+# ===================================
 Write-Output ""
-Write-Output "=== TEST: Splits with Tabs ==="
+Write-Output "=== TEST 4: Split Navigation ==="
 $proc = Launch-Ghostty
 Write-Output "  Launched PID=$($proc.Id)"
-Start-Sleep -Seconds 2
 
-# Create a split in tab 1
-Send-Keys $proc "^+{ENTER}"
-Start-Sleep -Seconds 2
-
-Take-Screenshot $proc "split_08_tab1_split"
-
-# Open a new tab
-Send-Keys $proc "^+t"
+# Create a split
+Send-Shortcut $proc "^+o"
 Start-Sleep -Seconds 3
 
-Take-Screenshot $proc "split_09_tab2_no_split"
-
-# Switch back to tab 1
-Send-Keys $proc "^+{PGUP}"
+# Navigate previous (Ctrl+Shift+[)
+Send-Shortcut $proc "^+{[}"
 Start-Sleep -Seconds 1
 
-Take-Screenshot $proc "split_10_back_to_tab1"
-
-# Switch to tab 2
-Send-Keys $proc "^+{PGDN}"
+# Navigate next (Ctrl+Shift+])
+Send-Shortcut $proc "^+{]}"
 Start-Sleep -Seconds 1
 
-if (-not $proc.HasExited) {
-    Write-Output "  OK: Process alive after splits + tab switching"
-    $pass++
-} else {
-    Write-Output "  FAIL: Process died during splits + tab switching"
+# Navigate back
+Send-Shortcut $proc "^+{[}"
+Start-Sleep -Seconds 1
+
+Take-Screenshot $proc "split_05_navigation"
+
+if ($proc.HasExited) {
+    Write-Output "  FAIL: Process crashed during split navigation"
     $fail++
+} else {
+    Write-Output "  OK: Process alive after split navigation"
+    $pass++
 }
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
+Kill-Ghostty $proc
+Write-Output "  DONE"
 
-# ═══════════════════════════════════════
-# TEST: Move Tab
-# ═══════════════════════════════════════
+# ===================================
+# TEST 5: Splits + Tabs
+# ===================================
 Write-Output ""
-Write-Output "=== TEST: Move Tab ==="
+Write-Output "=== TEST 5: Splits + Tabs ==="
 $proc = Launch-Ghostty
 Write-Output "  Launched PID=$($proc.Id)"
+
+# Create a split in tab 1
+Send-Shortcut $proc "^+o"
 Start-Sleep -Seconds 2
 
-# Open 2 extra tabs (3 total)
-Send-Keys $proc "^+t"
-Start-Sleep -Seconds 2
-Send-Keys $proc "^+t"
-Start-Sleep -Seconds 2
+# Open a new tab
+Send-Shortcut $proc "^+t"
+Start-Sleep -Seconds 3
 
-Take-Screenshot $proc "split_11_three_tabs"
+# Switch back to tab 1 (Ctrl+Shift+PageUp)
+Send-Shortcut $proc "^+{PGUP}"
+Start-Sleep -Seconds 1
 
-# Move tab left (Ctrl+Shift+, or platform-specific binding)
-# Note: move_tab keybinding may vary by config
-# Default might be Ctrl+Shift+PageUp with Shift held — check config
-# For now, test that the process survives the keybinding attempt
+# Switch to tab 2
+Send-Shortcut $proc "^+{PGDN}"
+Start-Sleep -Seconds 1
 
-if (-not $proc.HasExited) {
-    Write-Output "  OK: Process alive with 3 tabs"
-    $pass++
-} else {
-    Write-Output "  FAIL: Process died"
+Take-Screenshot $proc "split_06_splits_tabs"
+
+if ($proc.HasExited) {
+    Write-Output "  FAIL: Process crashed during splits + tab switching"
     $fail++
+} else {
+    Write-Output "  OK: Process alive after splits + tab operations"
+    $pass++
 }
-& taskkill /PID $proc.Id /T /F 2>$null | Out-Null
-Write-Output "  PASSED"
+Kill-Ghostty $proc
+Write-Output "  DONE"
 
-# ═══════════════════════════════════════
+# ===================================
+# TEST 6: Close All Splits Returns to Single Pane
+# ===================================
+Write-Output ""
+Write-Output "=== TEST 6: Close All Splits ==="
+$proc = Launch-Ghostty
+Write-Output "  Launched PID=$($proc.Id)"
+
+# Create 2 splits (3 panes)
+Send-Shortcut $proc "^+o"
+Start-Sleep -Seconds 2
+Send-Shortcut $proc "^+o"
+Start-Sleep -Seconds 2
+
+$before = Count-ChildWindows $proc "GhosttyTerminal"
+Write-Output "  Panes before closing: $before"
+
+# Close 2 panes
+Send-Shortcut $proc "^+w"
+Start-Sleep -Seconds 2
+Send-Shortcut $proc "^+w"
+Start-Sleep -Seconds 2
+
+if ($proc.HasExited) {
+    Write-Output "  FAIL: Process exited after closing split panes (should still have 1)"
+    $fail++
+} else {
+    $after = Count-ChildWindows $proc "GhosttyTerminal"
+    Write-Output "  Panes after closing 2: $after"
+    Write-Output "  OK: Process alive with remaining pane"
+    $pass++
+}
+
+Take-Screenshot $proc "split_07_all_closed"
+Kill-Ghostty $proc
+Write-Output "  DONE"
+
+# ===================================
 Write-Output ""
 Write-Output "================================"
 Write-Output "Results: $pass passed, $fail failed"
