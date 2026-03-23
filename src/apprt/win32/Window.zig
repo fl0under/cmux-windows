@@ -418,6 +418,48 @@ fn layoutNode(self: *Window, tree: SplitTree(Surface), handle: SplitTree(Surface
     }
 }
 
+/// Create a new split in the active tab.
+pub fn newSplit(self: *Window, direction: SplitTree(Surface).Split.Direction) !void {
+    if (self.tab_count == 0) return;
+    const alloc = self.app.core_app.alloc;
+    const tab = self.active_tab;
+
+    const active_surface = self.tab_active_surface[tab];
+    const handle = self.findHandle(tab, active_surface) orelse return;
+
+    // Create new surface.
+    const new_surface = try alloc.create(Surface);
+    errdefer {
+        new_surface.deinit();
+        alloc.destroy(new_surface);
+    }
+    try new_surface.init(self.app, self);
+
+    // Create a single-node tree for the new surface.
+    var insert_tree = try SplitTree(Surface).init(alloc, new_surface);
+    defer insert_tree.deinit();
+
+    // Split the current tree at the active surface.
+    const new_tree = try self.tab_trees[tab].split(
+        alloc,
+        handle,
+        direction,
+        @as(f16, 0.5),
+        &insert_tree,
+    );
+
+    // Replace old tree.
+    var old_tree = self.tab_trees[tab];
+    old_tree.deinit();
+    self.tab_trees[tab] = new_tree;
+
+    // Focus the new surface.
+    self.tab_active_surface[tab] = new_surface;
+
+    self.layoutSplits();
+    if (new_surface.hwnd) |h| _ = w32.SetFocus(h);
+}
+
 /// Navigate to a tab by GotoTab target (previous, next, last, or index).
 pub fn selectTab(self: *Window, target: apprt.action.GotoTab) bool {
     if (self.tab_count <= 1) return false;

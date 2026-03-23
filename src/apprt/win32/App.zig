@@ -13,6 +13,7 @@ const internal_os = @import("../../os/main.zig");
 
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
+const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -795,6 +796,24 @@ pub fn performAction(
         .readonly,
         .float_window,
         => return true,
+
+        .new_split => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    const dir: SplitTree(Surface).Split.Direction = switch (value) {
+                        .left => .left,
+                        .right => .right,
+                        .up => .up,
+                        .down => .down,
+                    };
+                    core_surface.rt_surface.parent_window.newSplit(dir) catch |err| {
+                        log.err("failed to create split: {}", .{err});
+                    };
+                },
+            }
+            return true;
+        },
 
         // Return false for unhandled actions
         else => return false,
