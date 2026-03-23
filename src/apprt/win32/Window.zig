@@ -447,10 +447,14 @@ pub fn layoutSplits(self: *Window) void {
     }
     self.layoutNode(tree, .root, rect);
 
-    // Invalidate the content area so divider lines are repainted.
+    // Paint divider lines directly using GetDC (not BeginPaint, which
+    // clips to the invalid region and misses the content area gaps).
     if (self.hwnd) |hwnd| {
-        var content_rect = self.surfaceRect();
-        _ = w32.InvalidateRect(hwnd, &content_rect, 0);
+        const hdc = w32.GetDC(hwnd);
+        if (hdc) |dc| {
+            self.paintDividers(dc);
+            _ = w32.ReleaseDC(hwnd, dc);
+        }
     }
 }
 
@@ -504,7 +508,7 @@ fn paintDividerNode(self: *Window, hdc: w32.HDC, tree: SplitTree(Surface), handl
             const gap: i32 = @intFromFloat(@round(5.0 * self.scale));
             const line_w: i32 = @max(@as(i32, @intFromFloat(@round(1.0 * self.scale))), 1);
 
-            const pen = w32.CreatePen(0, line_w, 0x00404040) orelse return;
+            const pen = w32.CreatePen(0, line_w, 0x00808080) orelse return;
             defer _ = w32.DeleteObject(pen);
             const old_pen = w32.SelectObject(hdc, pen);
             defer _ = w32.SelectObject(hdc, old_pen);
@@ -1075,9 +1079,6 @@ fn paintTabBar(self: *Window) void {
 
     // --- BitBlt to screen ---
     _ = w32.BitBlt(hdc_screen, 0, 0, client_w, bar_h, mem_dc, 0, 0, w32.SRCCOPY);
-
-    // --- Paint divider lines in the content area (below tab bar) ---
-    self.paintDividers(hdc_screen);
 }
 
 /// Toggle fullscreen mode on the top-level window.
