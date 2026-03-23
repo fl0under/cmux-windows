@@ -105,6 +105,32 @@ search_edit: ?w32.HWND = null,
 /// Whether the search bar is currently visible.
 search_active: bool = false,
 
+/// Reference count for SplitTree ownership. Starts at 0 because
+/// SplitTree.init() calls ref() to take initial ownership.
+ref_count: u32 = 0,
+
+/// SplitTree view protocol: increment reference count.
+pub fn ref(self: *Surface, alloc: Allocator) Allocator.Error!*Surface {
+    _ = alloc;
+    self.ref_count += 1;
+    return self;
+}
+
+/// SplitTree view protocol: decrement reference count.
+pub fn unref(self: *Surface, alloc: Allocator) void {
+    self.ref_count -= 1;
+    if (self.ref_count == 0) {
+        if (self.hwnd) |h| _ = w32.ShowWindow(h, w32.SW_HIDE);
+        self.deinit();
+        alloc.destroy(self);
+    }
+}
+
+/// SplitTree view protocol: identity comparison.
+pub fn eql(self: *const Surface, other: *const Surface) bool {
+    return self == other;
+}
+
 /// Initialize a new Surface by creating a Win32 window and WGL context,
 /// then initialize the core terminal surface (fonts, renderer, PTY, IO).
 pub fn init(self: *Surface, app: *App, parent: *Window) !void {
