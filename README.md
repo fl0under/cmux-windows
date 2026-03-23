@@ -66,11 +66,22 @@ The goal is to track the upstream main branch while maintaining a native Windows
   - Active tab highlight with blue accent line, close buttons, hover effects
   - New-tab (+) button, click to switch tabs, Ctrl+Shift+PgUp/PgDn navigation
   - Tab titles from shell, `window-new-tab-position` and `window-show-tab-bar` configs
+  - Move tab left/right (`move_tab` action with wrapping)
+  - Close tab modes: current, all others, all to the right (`close_tab` with modes)
+- Split panes using the core `SplitTree` data structure (same as GTK)
+  - Split right (Ctrl+Shift+O), split down (Ctrl+Shift+E)
+  - Navigate between panes (Ctrl+Shift+[ / ], or directional via keybindings)
+  - Resize splits (keyboard `resize_split` action, or mouse drag on divider)
+  - Equalize all splits, toggle split zoom
+  - Close individual pane (Ctrl+Shift+W) — remaining panes stay open
+  - DPI-scaled divider lines with drag resize cursor feedback
+  - Double-click divider to equalize that split
+  - Splits are per-tab — each tab has its own independent split tree
 
 ### Not Yet Implemented
 
 - Tab drag reorder, tab context menu, tab colors
-- Splits
+- Quick terminal, command palette, inspector
 - Release build + installer (MSI/MSIX)
 
 ## Building
@@ -144,12 +155,13 @@ A test harness runs from WSL2 using PowerShell automation:
 bash test/win32/ghostty_test.sh all
 ```
 
-Tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config file loading, scrollbar, close confirmation, URL detection, desktop notifications, and tabs.
+Tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config file loading, scrollbar, close confirmation, URL detection, desktop notifications, tabs, and splits.
 
-Tab-specific tests run in a single PowerShell session (required for WSL2 desktop isolation):
+Tab and split tests run in PowerShell sessions:
 
 ```bash
 powershell.exe -ExecutionPolicy Bypass -File test/win32/test_tabs.ps1 -ExePath path\to\ghostty.exe
+powershell.exe -ExecutionPolicy Bypass -File test/win32/test_splits.ps1 -ExePath path\to\ghostty.exe
 ```
 
 ## Syncing with Upstream
