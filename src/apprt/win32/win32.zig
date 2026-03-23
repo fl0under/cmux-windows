@@ -923,6 +923,9 @@ pub extern "gdi32" fn DeleteDC(hdc: HDC) callconv(.c) i32;
 pub extern "gdi32" fn BitBlt(hdcDest: HDC, x: i32, y: i32, cx: i32, cy: i32, hdcSrc: HDC, x1: i32, y1: i32, rop: u32) callconv(.c) i32;
 pub extern "gdi32" fn DrawTextW(hdc: HDC, lpchText: [*]const u16, cchText: i32, lprc: *RECT, format: u32) callconv(.c) i32;
 pub extern "gdi32" fn SetBkMode(hdc: HDC, mode: i32) callconv(.c) i32;
+pub extern "gdi32" fn CreatePen(iStyle: i32, cWidth: i32, color: u32) callconv(.c) ?*anyopaque;
+pub extern "gdi32" fn MoveToEx(hdc: HDC, x: i32, y: i32, lppt: ?*anyopaque) callconv(.c) i32;
+pub extern "gdi32" fn LineTo(hdc: HDC, x: i32, y: i32) callconv(.c) i32;
 
 pub extern "user32" fn BeginPaint(hwnd: HWND, lpPaint: *PAINTSTRUCT) callconv(.c) ?HDC;
 pub extern "user32" fn EndPaint(hwnd: HWND, lpPaint: *const PAINTSTRUCT) callconv(.c) i32;

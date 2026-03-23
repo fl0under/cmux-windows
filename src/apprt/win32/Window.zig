@@ -425,6 +425,12 @@ pub fn layoutSplits(self: *Window) void {
         return;
     }
     self.layoutNode(tree, .root, rect);
+
+    // Invalidate the content area so divider lines are repainted.
+    if (self.hwnd) |hwnd| {
+        var content_rect = self.surfaceRect();
+        _ = w32.InvalidateRect(hwnd, &content_rect, 0);
+    }
 }
 
 fn layoutNode(self: *Window, tree: SplitTree(Surface), handle: SplitTree(Surface).Node.Handle, rect: w32.RECT) void {
@@ -454,6 +460,52 @@ fn layoutNode(self: *Window, tree: SplitTree(Surface), handle: SplitTree(Surface
                 const bottom_rect = w32.RECT{ .left = rect.left, .top = split_y + @divTrunc(gap + 1, 2), .right = rect.right, .bottom = rect.bottom };
                 self.layoutNode(tree, s.left, top_rect);
                 self.layoutNode(tree, s.right, bottom_rect);
+            }
+        },
+    }
+}
+
+/// Paint divider lines between split panes in the active tab.
+fn paintDividers(self: *Window, hdc: w32.HDC) void {
+    if (self.tab_count == 0) return;
+    const tree = self.tab_trees[self.active_tab];
+    if (!tree.isSplit()) return;
+    if (tree.zoomed != null) return;
+    const rect = self.surfaceRect();
+    self.paintDividerNode(hdc, tree, .root, rect);
+}
+
+fn paintDividerNode(self: *Window, hdc: w32.HDC, tree: SplitTree(Surface), handle: SplitTree(Surface).Node.Handle, rect: w32.RECT) void {
+    if (handle.idx() >= tree.nodes.len) return;
+    switch (tree.nodes[handle.idx()]) {
+        .leaf => {},
+        .split => |s| {
+            const gap: i32 = @intFromFloat(@round(5.0 * self.scale));
+            const line_w: i32 = @max(@as(i32, @intFromFloat(@round(1.0 * self.scale))), 1);
+
+            const pen = w32.CreatePen(0, line_w, 0x00404040) orelse return;
+            defer _ = w32.DeleteObject(pen);
+            const old_pen = w32.SelectObject(hdc, pen);
+            defer _ = w32.SelectObject(hdc, old_pen);
+
+            if (s.layout == .horizontal) {
+                const total_w = rect.right - rect.left;
+                const split_x = rect.left + @as(i32, @intFromFloat(@as(f32, @floatCast(s.ratio)) * @as(f32, @floatFromInt(total_w))));
+                _ = w32.MoveToEx(hdc, split_x, rect.top, null);
+                _ = w32.LineTo(hdc, split_x, rect.bottom);
+                const left_rect = w32.RECT{ .left = rect.left, .top = rect.top, .right = split_x - @divTrunc(gap, 2), .bottom = rect.bottom };
+                const right_rect = w32.RECT{ .left = split_x + @divTrunc(gap + 1, 2), .top = rect.top, .right = rect.right, .bottom = rect.bottom };
+                self.paintDividerNode(hdc, tree, s.left, left_rect);
+                self.paintDividerNode(hdc, tree, s.right, right_rect);
+            } else {
+                const total_h = rect.bottom - rect.top;
+                const split_y = rect.top + @as(i32, @intFromFloat(@as(f32, @floatCast(s.ratio)) * @as(f32, @floatFromInt(total_h))));
+                _ = w32.MoveToEx(hdc, rect.left, split_y, null);
+                _ = w32.LineTo(hdc, rect.right, split_y);
+                const top_rect = w32.RECT{ .left = rect.left, .top = rect.top, .right = rect.right, .bottom = split_y - @divTrunc(gap, 2) };
+                const bottom_rect = w32.RECT{ .left = rect.left, .top = split_y + @divTrunc(gap + 1, 2), .right = rect.right, .bottom = rect.bottom };
+                self.paintDividerNode(hdc, tree, s.left, top_rect);
+                self.paintDividerNode(hdc, tree, s.right, bottom_rect);
             }
         },
     }
@@ -912,6 +964,9 @@ fn paintTabBar(self: *Window) void {
 
     // --- BitBlt to screen ---
     _ = w32.BitBlt(hdc_screen, 0, 0, client_w, bar_h, mem_dc, 0, 0, w32.SRCCOPY);
+
+    // --- Paint divider lines in the content area (below tab bar) ---
+    self.paintDividers(hdc_screen);
 }
 
 /// Toggle fullscreen mode on the top-level window.
