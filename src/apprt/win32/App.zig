@@ -961,9 +961,9 @@ fn surfaceWndProc(
 
         w32.WM_CLOSE => {
             // Posted by Surface.close() to defer destruction to the
-            // message loop. This is the safe place to call closeTab
+            // message loop. This is the safe place to call closeSplitSurface
             // (outside of core_surface callbacks).
-            surface.parent_window.closeTab(surface);
+            surface.parent_window.closeSplitSurface(surface);
             return 0;
         },
 

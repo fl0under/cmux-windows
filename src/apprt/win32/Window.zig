@@ -346,6 +346,47 @@ pub fn closeTabMode(self: *Window, mode: apprt.action.CloseTabMode, surface: *Su
     }
 }
 
+/// Close a single surface within a split tree. If it's the last surface
+/// in the tab, close the entire tab instead.
+pub fn closeSplitSurface(self: *Window, surface: *Surface) void {
+    const alloc = self.app.core_app.alloc;
+    const tab = self.findTabIndex(surface) orelse return;
+    const tree = &self.tab_trees[tab];
+
+    if (!tree.isSplit()) {
+        self.closeTab(surface);
+        return;
+    }
+
+    const handle = self.findHandle(tab, surface) orelse return;
+
+    const next_handle = (tree.goto(alloc, handle, .next) catch null) orelse
+        (tree.goto(alloc, handle, .previous) catch null);
+    const next_surface: ?*Surface = if (next_handle) |nh|
+        switch (tree.nodes[nh.idx()]) {
+            .leaf => |v| v,
+            .split => null,
+        }
+    else
+        null;
+
+    const new_tree = tree.remove(alloc, handle) catch {
+        log.err("failed to remove surface from split tree", .{});
+        return;
+    };
+    var old_tree = self.tab_trees[tab];
+    old_tree.deinit();
+    self.tab_trees[tab] = new_tree;
+
+    if (next_surface) |ns| {
+        self.tab_active_surface[tab] = ns;
+        self.layoutSplits();
+        if (ns.hwnd) |h| _ = w32.SetFocus(h);
+    } else {
+        self.closeTabByIndex(tab);
+    }
+}
+
 /// Switch to the tab at the given index.
 pub fn selectTabIndex(self: *Window, idx: usize) void {
     if (idx >= self.tab_count) return;
