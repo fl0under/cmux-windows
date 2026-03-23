@@ -1034,3 +1034,84 @@ pub extern "user32" fn TrackPopupMenuEx(
 pub extern "user32" fn DestroyMenu(
     hMenu: HMENU,
 ) callconv(.c) i32;
+
+// -----------------------------------------------------------------------
+// Global hotkey API
+// -----------------------------------------------------------------------
+
+pub const WM_HOTKEY: u32 = 0x0312;
+
+pub const MOD_ALT: u32 = 0x0001;
+pub const MOD_CONTROL: u32 = 0x0002;
+pub const MOD_SHIFT: u32 = 0x0004;
+pub const MOD_WIN: u32 = 0x0008;
+pub const MOD_NOREPEAT: u32 = 0x4000;
+
+pub extern "user32" fn RegisterHotKey(
+    hWnd: ?HWND,
+    id: i32,
+    fsModifiers: u32,
+    vk: u32,
+) callconv(.c) i32;
+
+pub extern "user32" fn UnregisterHotKey(
+    hWnd: ?HWND,
+    id: i32,
+) callconv(.c) i32;
+
+// -----------------------------------------------------------------------
+// Monitor API (additional)
+// -----------------------------------------------------------------------
+
+pub const MONITOR_DEFAULTTOPRIMARY: u32 = 0x00000001;
+
+pub extern "user32" fn MonitorFromPoint(
+    pt: POINT,
+    dwFlags: u32,
+) callconv(.c) ?HMONITOR;
+
+// -----------------------------------------------------------------------
+// Performance counter API
+// -----------------------------------------------------------------------
+
+pub extern "kernel32" fn QueryPerformanceCounter(
+    lpPerformanceCount: *i64,
+) callconv(.c) i32;
+
+pub extern "kernel32" fn QueryPerformanceFrequency(
+    lpFrequency: *i64,
+) callconv(.c) i32;
+
+// -----------------------------------------------------------------------
+// Thread input and foreground focus API
+// -----------------------------------------------------------------------
+
+pub const WM_ACTIVATE: u32 = 0x0006;
+pub const WA_INACTIVE: u16 = 0;
+
+pub extern "kernel32" fn GetCurrentThreadId() callconv(.c) u32;
+
+pub extern "user32" fn GetForegroundWindow() callconv(.c) ?HWND;
+
+pub extern "user32" fn GetWindowThreadProcessId(
+    hWnd: HWND,
+    lpdwProcessId: ?*u32,
+) callconv(.c) u32;
+
+pub extern "user32" fn AttachThreadInput(
+    idAttach: u32,
+    idAttachTo: u32,
+    fAttach: i32,
+) callconv(.c) i32;
+
+pub extern "user32" fn SetForegroundWindow(
+    hWnd: HWND,
+) callconv(.c) i32;
+
+// -----------------------------------------------------------------------
+// Window positioning constants (additional)
+// -----------------------------------------------------------------------
+
+pub const HWND_TOPMOST: ?HWND = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+pub const SWP_NOACTIVATE: u32 = 0x0010;
+pub const SW_SHOWNOACTIVATE: i32 = 4;

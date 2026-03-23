@@ -11,6 +11,7 @@ const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const internal_os = @import("../../os/main.zig");
 
+const QuickTerminal = @import("QuickTerminal.zig");
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
@@ -72,6 +73,12 @@ quit_timer_state: enum { off, active, expired } = .off,
 
 /// Whether quit has been requested.
 quit_requested: bool = false,
+
+/// The quick terminal instance (if active).
+quick_terminal: ?*QuickTerminal = null,
+
+/// Whether a global hotkey has been registered.
+global_hotkey_registered: bool = false,
 
 pub fn init(
     self: *App,
@@ -197,6 +204,9 @@ pub fn init(
 
     // Store self pointer in msg_hwnd's GWLP_USERDATA for msgWndProc access
     _ = w32.SetWindowLongPtrW(self.msg_hwnd.?, w32.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
+
+    // Register global hotkey for quick terminal (if configured).
+    self.registerGlobalHotkey();
 }
 
 pub fn run(self: *App) !void {
@@ -204,7 +214,7 @@ pub fn run(self: *App) !void {
     const alloc = self.core_app.alloc;
     const window = try alloc.create(Window);
     errdefer alloc.destroy(window);
-    try window.init(self);
+    try window.init(self, .{});
     try self.windows.append(alloc, window);
     _ = try window.addTab();
 
@@ -223,6 +233,16 @@ pub fn run(self: *App) !void {
         }
         if (result < 0) return error.Win32Error;
         if (self.quit_requested) break;
+
+        // Handle global hotkey for quick terminal.
+        if (msg.message == w32.WM_HOTKEY) {
+            _ = self.performAction(
+                .{ .app = {} },
+                .toggle_quick_terminal,
+                {},
+            ) catch {};
+            continue;
+        }
 
         // Intercept keystrokes destined for the search edit control so
         // Enter/Escape can navigate matches or close the search bar.
@@ -248,6 +268,18 @@ pub fn run(self: *App) !void {
 
 pub fn terminate(self: *App) void {
     self.stopQuitTimer();
+
+    // Unregister global hotkey.
+    if (self.global_hotkey_registered) {
+        _ = w32.UnregisterHotKey(null, 1);
+        self.global_hotkey_registered = false;
+    }
+
+    // Destroy quick terminal if active.
+    if (self.quick_terminal) |qt| {
+        qt.deinit();
+        self.quick_terminal = null;
+    }
 
     if (self.msg_hwnd) |hwnd| {
         // Clear GWLP_USERDATA before destroying so msgWndProc sees
@@ -324,7 +356,7 @@ pub fn performAction(
                 log.err("failed to allocate new window err={}", .{err});
                 return true;
             };
-            window.init(self) catch |err| {
+            window.init(self, .{}) catch |err| {
                 log.err("failed to init new window err={}", .{err});
                 alloc.destroy(window);
                 return true;
@@ -378,6 +410,11 @@ pub fn performAction(
                 }
                 const bg = new_config.background;
                 self.bg_brush = w32.CreateSolidBrush(w32.RGB(bg.r, bg.g, bg.b));
+
+                // Update quick terminal config.
+                if (self.quick_terminal) |qt| {
+                    qt.onConfigChange(&self.config);
+                }
             } else |err| {
                 log.err("error updating app config err={}", .{err});
             }
@@ -856,9 +893,114 @@ pub fn performAction(
             return true;
         },
 
+        .toggle_quick_terminal => {
+            if (self.quick_terminal) |qt| {
+                qt.toggle();
+            } else {
+                const qt = QuickTerminal.init(self) catch |err| {
+                    log.err("failed to create quick terminal: {}", .{err});
+                    return true;
+                };
+                self.quick_terminal = qt;
+                qt.toggle();
+            }
+            return true;
+        },
+
         // Return false for unhandled actions
         else => return false,
     }
+}
+
+/// Register a system-wide hotkey for toggle_quick_terminal.
+/// Scans keybinds for entries with the `global` flag.
+fn registerGlobalHotkey(self: *App) void {
+    var it = self.config.keybind.set.bindings.iterator();
+    while (it.next()) |entry| {
+        const leaf = switch (entry.value_ptr.*) {
+            .leader => continue,
+            .leaf => |l| l,
+            .leaf_chained => continue,
+        };
+        if (!leaf.flags.global) continue;
+
+        // Check if this binding is for toggle_quick_terminal.
+        const is_quick_terminal = switch (leaf.action) {
+            .toggle_quick_terminal => true,
+            else => false,
+        };
+        if (!is_quick_terminal) continue;
+
+        const trigger = entry.key_ptr.*;
+
+        // Convert Ghostty mods to Win32 mods.
+        var mods: u32 = w32.MOD_NOREPEAT;
+        if (trigger.mods.ctrl) mods |= w32.MOD_CONTROL;
+        if (trigger.mods.alt) mods |= w32.MOD_ALT;
+        if (trigger.mods.shift) mods |= w32.MOD_SHIFT;
+        if (trigger.mods.super) mods |= w32.MOD_WIN;
+
+        // Convert Ghostty key to Win32 VK.
+        const vk: ?u32 = switch (trigger.key) {
+            .physical => |phys| keyToVk(phys),
+            .unicode => |cp| blk: {
+                // For ASCII characters, VK code = uppercase char.
+                if (cp >= 'a' and cp <= 'z') break :blk @as(u32, cp - 'a' + 'A');
+                if (cp >= '0' and cp <= '9') break :blk @as(u32, cp);
+                break :blk null;
+            },
+            else => null,
+        };
+
+        if (vk) |vk_code| {
+            if (w32.RegisterHotKey(null, 1, mods, vk_code) != 0) {
+                self.global_hotkey_registered = true;
+                log.info("registered global hotkey for quick terminal", .{});
+            } else {
+                log.warn("failed to register global hotkey (may be in use by another app)", .{});
+            }
+        } else {
+            log.warn("unsupported key for global hotkey", .{});
+        }
+        break; // Only register the first matching binding.
+    }
+}
+
+/// Map a Ghostty physical key to a Win32 virtual key code.
+fn keyToVk(key: @import("../../input/key.zig").Key) ?u32 {
+    return switch (key) {
+        .key_a => 0x41, .key_b => 0x42, .key_c => 0x43, .key_d => 0x44,
+        .key_e => 0x45, .key_f => 0x46, .key_g => 0x47, .key_h => 0x48,
+        .key_i => 0x49, .key_j => 0x4A, .key_k => 0x4B, .key_l => 0x4C,
+        .key_m => 0x4D, .key_n => 0x4E, .key_o => 0x4F, .key_p => 0x50,
+        .key_q => 0x51, .key_r => 0x52, .key_s => 0x53, .key_t => 0x54,
+        .key_u => 0x55, .key_v => 0x56, .key_w => 0x57, .key_x => 0x58,
+        .key_y => 0x59, .key_z => 0x5A,
+        .digit_0 => 0x30, .digit_1 => 0x31, .digit_2 => 0x32, .digit_3 => 0x33,
+        .digit_4 => 0x34, .digit_5 => 0x35, .digit_6 => 0x36, .digit_7 => 0x37,
+        .digit_8 => 0x38, .digit_9 => 0x39,
+        .backquote => w32.VK_OEM_3,
+        .minus => w32.VK_OEM_MINUS,
+        .equal => w32.VK_OEM_PLUS,
+        .bracket_left => w32.VK_OEM_4,
+        .bracket_right => w32.VK_OEM_6,
+        .backslash => w32.VK_OEM_5,
+        .semicolon => w32.VK_OEM_1,
+        .quote => w32.VK_OEM_7,
+        .comma => w32.VK_OEM_COMMA,
+        .period => w32.VK_OEM_PERIOD,
+        .slash => w32.VK_OEM_2,
+        .enter => w32.VK_RETURN,
+        .tab => w32.VK_TAB,
+        .space => w32.VK_SPACE,
+        .backspace => w32.VK_BACK,
+        .escape => w32.VK_ESCAPE,
+        .f1 => w32.VK_F1, .f2 => w32.VK_F2, .f3 => w32.VK_F3,
+        .f4 => w32.VK_F4, .f5 => w32.VK_F5, .f6 => w32.VK_F6,
+        .f7 => w32.VK_F7, .f8 => w32.VK_F8, .f9 => w32.VK_F9,
+        .f10 => w32.VK_F10, .f11 => w32.VK_F11, .f12 => w32.VK_F12,
+        else => null,
+    };
 }
 
 /// Start the quit timer. Called when the last surface closes.
@@ -1189,6 +1331,12 @@ fn msgWndProc(
         app.quit_timer_state = .expired;
         app.quit_requested = true;
         w32.PostQuitMessage(0);
+        return 0;
+    }
+
+    // Timer ID 3: quick terminal animation tick.
+    if (msg == w32.WM_TIMER and wparam == QuickTerminal.ANIM_TIMER_ID) {
+        if (app.quick_terminal) |qt| qt.onAnimationTick();
         return 0;
     }
 

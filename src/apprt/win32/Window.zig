@@ -75,24 +75,35 @@ tab_font: ?*anyopaque = null,
 /// Whether WM_MOUSELEAVE tracking is active for the tab bar.
 tracking_mouse: bool = false,
 
+/// Whether this window is a quick terminal (borderless popup, no tabs).
+is_quick_terminal: bool = false,
+
 /// Split divider drag state.
 dragging_split: bool = false,
 drag_split_handle: SplitTree(Surface).Node.Handle = .root,
 drag_split_layout: SplitTree(Surface).Split.Layout = .horizontal,
 drag_start_rect: w32.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 },
 
+pub const InitOptions = struct {
+    is_quick_terminal: bool = false,
+};
+
 /// Initialize the Window by creating the top-level HWND and tab bar font.
-pub fn init(self: *Window, app: *App) !void {
+pub fn init(self: *Window, app: *App, options: InitOptions) !void {
     self.* = .{
         .app = app,
+        .is_quick_terminal = options.is_quick_terminal,
     };
+
+    const style: u32 = if (options.is_quick_terminal) w32.WS_POPUP else w32.WS_OVERLAPPEDWINDOW;
+    const ex_style: u32 = if (options.is_quick_terminal) w32.WS_EX_TOOLWINDOW else 0;
 
     // Create the top-level container window using the GhosttyWindow class.
     const hwnd = w32.CreateWindowExW(
-        0,
+        ex_style,
         App.WINDOW_CLASS_NAME,
         std.unicode.utf8ToUtf16LeStringLiteral("Ghostty"),
-        w32.WS_OVERLAPPEDWINDOW,
+        style,
         w32.CW_USEDEFAULT,
         w32.CW_USEDEFAULT,
         800,
@@ -278,14 +289,19 @@ pub fn addTab(self: *Window) !*Surface {
 
     if (self.tab_count == 1) {
         // First tab — show the parent window now that the terminal is ready.
-        if (self.hwnd) |h| {
-            _ = w32.ShowWindow(h, w32.SW_SHOW);
-            _ = w32.UpdateWindow(h);
+        // Quick terminal windows are shown by QuickTerminal.animateIn() instead.
+        if (!self.is_quick_terminal) {
+            if (self.hwnd) |h| {
+                _ = w32.ShowWindow(h, w32.SW_SHOW);
+                _ = w32.UpdateWindow(h);
+            }
         }
         self.active_tab = pos;
         self.updateWindowTitle();
         // Set keyboard focus to the child surface so it receives input.
-        if (surface.hwnd) |h| _ = w32.SetFocus(h);
+        if (!self.is_quick_terminal) {
+            if (surface.hwnd) |h| _ = w32.SetFocus(h);
+        }
     } else {
         self.selectTabIndex(pos);
     }
@@ -827,6 +843,10 @@ pub fn onTabTitleChanged(self: *Window, surface: *Surface, title: [:0]const u8) 
 
 /// Update tab bar visibility based on config and tab count.
 fn updateTabBarVisibility(self: *Window) void {
+    if (self.is_quick_terminal) {
+        self.tab_bar_visible = false;
+        return;
+    }
     const show_config = self.app.config.@"window-show-tab-bar";
     const should_show = switch (show_config) {
         .always => true,
@@ -1341,6 +1361,20 @@ fn cleanupAllSurfaces(self: *Window) void {
 fn onDestroy(self: *Window) void {
     const app = self.app;
 
+    // Quick terminal windows are managed by QuickTerminal, not the windows list.
+    if (self.is_quick_terminal) {
+        if (self.tab_font) |font| {
+            _ = w32.DeleteObject(font);
+            self.tab_font = null;
+        }
+        self.hwnd = null;
+        // QuickTerminal handles the rest of cleanup (freeing self, quit timer).
+        if (app.quick_terminal) |qt| {
+            qt.onWindowDestroyed();
+        }
+        return;
+    }
+
     // Remove from App's window list.
     for (app.windows.items, 0..) |w, i| {
         if (w == self) {
@@ -1359,8 +1393,8 @@ fn onDestroy(self: *Window) void {
     // Free the Window allocation.
     app.core_app.alloc.destroy(self);
 
-    // If no windows remain, start the quit timer.
-    if (app.windows.items.len == 0) {
+    // If no windows remain (and no quick terminal), start the quit timer.
+    if (app.windows.items.len == 0 and app.quick_terminal == null) {
         app.startQuitTimer();
     }
 }
@@ -1488,6 +1522,16 @@ pub fn windowWndProc(
         w32.WM_MOUSELEAVE => {
             window.handleTabBarMouseLeave();
             return 0;
+        },
+        w32.WM_ACTIVATE => {
+            const activated = @as(u16, @truncate(wparam & 0xFFFF));
+            if (activated == w32.WA_INACTIVE and window.is_quick_terminal) {
+                if (window.app.quick_terminal) |qt| {
+                    qt.onFocusLost();
+                }
+                return 0;
+            }
+            return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         else => return w32.DefWindowProcW(hwnd, msg, wparam, lparam),
     }
