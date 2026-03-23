@@ -121,7 +121,7 @@ pub fn add(
     // We don't support cross-compiling to Darwin but due to the way
     // lazy dependencies work with Zig, we call this function. So we just
     // bail. The build will fail but the build would've failed anyways.
-    // And this lets other non-platform-specific targets like `lib-vt`
+    // And this lets other non-platform-specific targets like `-Demit-lib-vt`
     // cross-compile properly.
     if (!builtin.target.os.tag.isDarwin() and
         self.config.target.result.os.tag.isDarwin())
@@ -134,6 +134,33 @@ pub fn add(
 
     // Every exe needs the terminal options
     self.config.terminalOptions().add(b, step.root_module);
+
+    // C imports needed to manage/create PTYs
+    switch (target.result.os.tag) {
+        .freebsd,
+        .linux,
+        .macos,
+        => {
+            const c = b.addTranslateC(.{
+                .root_source_file = b.path("src/pty.c"),
+                .target = target,
+                .optimize = optimize,
+            });
+            switch (target.result.os.tag) {
+                .macos => {
+                    const libc = try std.zig.LibCInstallation.findNative(.{
+                        .allocator = b.allocator,
+                        .target = &target.result,
+                        .verbose = false,
+                    });
+                    c.addSystemIncludePath(.{ .cwd_relative = libc.sys_include_dir.? });
+                },
+                else => {},
+            }
+            step.root_module.addImport("pty-c", c.createModule());
+        },
+        else => {},
+    }
 
     // Freetype. We always include this even if our font backend doesn't
     // use it because Dear Imgui uses Freetype.

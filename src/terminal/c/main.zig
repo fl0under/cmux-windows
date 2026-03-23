@@ -1,9 +1,11 @@
+const buildpkg = @import("build_info.zig");
 pub const cell = @import("cell.zig");
 pub const color = @import("color.zig");
 pub const focus = @import("focus.zig");
 pub const formatter = @import("formatter.zig");
 pub const modes = @import("modes.zig");
 pub const osc = @import("osc.zig");
+pub const render = @import("render.zig");
 pub const key_event = @import("key_event.zig");
 pub const key_encode = @import("key_encode.zig");
 pub const mouse_event = @import("mouse_event.zig");
@@ -16,6 +18,8 @@ pub const style = @import("style.zig");
 pub const terminal = @import("terminal.zig");
 
 // The full C API, unexported.
+pub const build_info = buildpkg.get;
+
 pub const osc_new = osc.new;
 pub const osc_free = osc.free;
 pub const osc_reset = osc.reset;
@@ -34,6 +38,23 @@ pub const formatter_terminal_new = formatter.terminal_new;
 pub const formatter_format_buf = formatter.format_buf;
 pub const formatter_format_alloc = formatter.format_alloc;
 pub const formatter_free = formatter.free;
+
+pub const render_state_new = render.new;
+pub const render_state_free = render.free;
+pub const render_state_update = render.update;
+pub const render_state_get = render.get;
+pub const render_state_set = render.set;
+pub const render_state_colors_get = render.colors_get;
+pub const render_state_row_iterator_new = render.row_iterator_new;
+pub const render_state_row_iterator_next = render.row_iterator_next;
+pub const render_state_row_get = render.row_get;
+pub const render_state_row_set = render.row_set;
+pub const render_state_row_iterator_free = render.row_iterator_free;
+pub const render_state_row_cells_new = render.row_cells_new;
+pub const render_state_row_cells_next = render.row_cells_next;
+pub const render_state_row_cells_select = render.row_cells_select;
+pub const render_state_row_cells_get = render.row_cells_get;
+pub const render_state_row_cells_free = render.row_cells_free;
 
 pub const sgr_new = sgr.new;
 pub const sgr_free = sgr.free;
@@ -118,6 +139,7 @@ pub const grid_ref_graphemes = grid_ref.grid_ref_graphemes;
 pub const grid_ref_style = grid_ref.grid_ref_style;
 
 test {
+    _ = buildpkg;
     _ = cell;
     _ = color;
     _ = grid_ref;
@@ -126,6 +148,7 @@ test {
     _ = formatter;
     _ = modes;
     _ = osc;
+    _ = render;
     _ = key_event;
     _ = key_encode;
     _ = mouse_event;

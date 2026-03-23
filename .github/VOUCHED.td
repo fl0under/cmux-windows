@@ -108,6 +108,7 @@ khipp
 kirwiisp
 kjvdven
 kloneets
+-kody-w
 koranir
 kristina8888
 kristofersoler
@@ -121,6 +122,7 @@ mahnokropotkinvich
 marijagjorgjieva
 markdorison
 markhuot
+marler8997
 marrocco-simone
 matkotiric
 micaeljarniac
@@ -170,11 +172,13 @@ seruman
 silveirapf
 slsrepo
 sunshine-syz
+tdgroot
 tdslot
 ticclick
 tnagatomi
 trag1c
 tristan957
+turbolent
 tweedbeetle
 uhojin
 unphased
