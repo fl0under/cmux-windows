@@ -531,6 +531,75 @@ pub fn gotoSplit(self: *Window, goto_target: apprt.action.GotoSplit) void {
     }
 }
 
+/// Resize the nearest split in the given direction by the given pixel amount.
+pub fn resizeSplit(self: *Window, rs: apprt.action.ResizeSplit) void {
+    if (self.tab_count == 0) return;
+    const alloc = self.app.core_app.alloc;
+    const tab = self.active_tab;
+    const tree = &self.tab_trees[tab];
+
+    const active_surface = self.tab_active_surface[tab];
+    const handle = self.findHandle(tab, active_surface) orelse return;
+
+    const layout: SplitTree(Surface).Split.Layout = switch (rs.direction) {
+        .left, .right => .horizontal,
+        .up, .down => .vertical,
+    };
+
+    const rect = self.surfaceRect();
+    const dimension: f32 = switch (layout) {
+        .horizontal => @floatFromInt(@max(rect.right - rect.left, 1)),
+        .vertical => @floatFromInt(@max(rect.bottom - rect.top, 1)),
+    };
+    const sign: f32 = switch (rs.direction) {
+        .left, .up => -1.0,
+        .right, .down => 1.0,
+    };
+    const delta: f16 = @floatCast(sign * @as(f32, @floatFromInt(rs.amount)) / dimension);
+
+    const new_tree = tree.resize(alloc, handle, layout, delta) catch return;
+    var old_tree = self.tab_trees[tab];
+    old_tree.deinit();
+    self.tab_trees[tab] = new_tree;
+    self.layoutSplits();
+}
+
+/// Equalize all splits in the active tab.
+pub fn equalizeSplits(self: *Window) void {
+    if (self.tab_count == 0) return;
+    const alloc = self.app.core_app.alloc;
+    const tab = self.active_tab;
+
+    const new_tree = self.tab_trees[tab].equalize(alloc) catch return;
+    var old_tree = self.tab_trees[tab];
+    old_tree.deinit();
+    self.tab_trees[tab] = new_tree;
+    self.layoutSplits();
+}
+
+/// Toggle zoom on the active split surface.
+pub fn toggleSplitZoom(self: *Window) void {
+    if (self.tab_count == 0) return;
+    const tab = self.active_tab;
+    var tree = &self.tab_trees[tab];
+
+    if (!tree.isSplit()) return;
+
+    const active_surface = self.tab_active_surface[tab];
+    const handle = self.findHandle(tab, active_surface) orelse return;
+
+    if (tree.zoomed) |z| {
+        if (z == handle) {
+            tree.zoom(null);
+        } else {
+            tree.zoom(handle);
+        }
+    } else {
+        tree.zoom(handle);
+    }
+    self.layoutSplits();
+}
+
 /// Navigate to a tab by GotoTab target (previous, next, last, or index).
 pub fn selectTab(self: *Window, target: apprt.action.GotoTab) bool {
     if (self.tab_count <= 1) return false;

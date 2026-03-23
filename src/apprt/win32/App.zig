@@ -825,6 +825,36 @@ pub fn performAction(
             return true;
         },
 
+        .resize_split => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.resizeSplit(value);
+                },
+            }
+            return true;
+        },
+
+        .equalize_splits => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.equalizeSplits();
+                },
+            }
+            return true;
+        },
+
+        .toggle_split_zoom => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.toggleSplitZoom();
+                },
+            }
+            return true;
+        },
+
         // Return false for unhandled actions
         else => return false,
     }
