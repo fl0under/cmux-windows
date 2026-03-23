@@ -572,8 +572,17 @@ pub fn performAction(
             return true;
         },
 
-        .move_tab, .toggle_tab_overview => {
-            // Acknowledge but no-op until further UI is implemented.
+        .move_tab => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    core_surface.rt_surface.parent_window.moveTab(value.amount);
+                },
+            }
+            return true;
+        },
+
+        .toggle_tab_overview => {
             return true;
         },
 

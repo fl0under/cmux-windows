@@ -409,6 +409,23 @@ pub fn selectTab(self: *Window, target: apprt.action.GotoTab) bool {
     return true;
 }
 
+/// Move the active tab by a relative offset, wrapping cyclically.
+pub fn moveTab(self: *Window, amount: isize) void {
+    if (self.tab_count <= 1) return;
+    const n: isize = @intCast(self.active_tab);
+    const count: isize = @intCast(self.tab_count);
+    const new_index: usize = @intCast(@mod(n + amount, count));
+    if (new_index == self.active_tab) return;
+
+    // Swap all tab state between active_tab and new_index.
+    std.mem.swap(SplitTree(Surface), &self.tab_trees[self.active_tab], &self.tab_trees[new_index]);
+    std.mem.swap(*Surface, &self.tab_active_surface[self.active_tab], &self.tab_active_surface[new_index]);
+    std.mem.swap([256]u16, &self.tab_titles[self.active_tab], &self.tab_titles[new_index]);
+    std.mem.swap(u16, &self.tab_title_lens[self.active_tab], &self.tab_title_lens[new_index]);
+    self.active_tab = new_index;
+    self.invalidateTabBar();
+}
+
 /// Update the top-level window title to match the active tab's title.
 fn updateWindowTitle(self: *Window) void {
     const hwnd = self.hwnd orelse return;
