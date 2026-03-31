@@ -1690,21 +1690,26 @@ pub fn windowWndProc(
                 if (!window.drag_active and dx > 5) {
                     window.drag_active = true;
                 }
-                if (window.drag_active) {
-                    // Find which tab position the mouse is over by checking
-                    // midpoints. If mouse is past a tab's midpoint, the
-                    // dragged tab should go after it.
+                if (window.drag_active and window.tab_count > 1) {
+                    // Use uniform tab widths for drag target calculation,
+                    // not the painted widths (the last tab gets stretched
+                    // to fill remaining space, skewing its midpoint).
                     const from: usize = @intCast(window.drag_tab);
+                    const first_w = window.tab_rects[0].right - window.tab_rects[0].left;
                     var target: usize = 0;
                     for (0..window.tab_count) |i| {
-                        const mid = @divTrunc(window.tab_rects[i].left + window.tab_rects[i].right, 2);
-                        if (x >= mid) {
+                        const slot_left: i32 = @intCast(@as(i32, @intCast(i)) * first_w);
+                        const slot_mid = slot_left + @divTrunc(first_w, 2);
+                        if (x >= slot_mid) {
                             target = i;
                         }
                     }
+                    // Clamp to valid range
+                    if (target >= window.tab_count) target = window.tab_count - 1;
                     if (target != from) {
                         window.moveTabTo(from, target);
                         window.drag_tab = @intCast(target);
+                        if (window.hwnd) |h| _ = w32.UpdateWindow(h);
                     }
                 }
                 return 0;
