@@ -258,6 +258,10 @@ pub const IDWriteFont = extern struct {
         CreateFontFace: *const fn (*const IDWriteFont, *?*IDWriteFontFace) callconv(.c) HRESULT,
     };
 
+    pub fn addRef(self: *IDWriteFont) void {
+        _ = self.vtable.AddRef(self);
+    }
+
     pub fn release(self: *IDWriteFont) void {
         _ = self.vtable.Release(self);
     }

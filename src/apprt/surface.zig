@@ -191,6 +191,12 @@ pub fn newConfig(
                 copy.@"working-directory" = .{ .path = pwd };
             }
         }
+
+        // Inherit the current font size if the user has adjusted it
+        // (via increase/decrease_font_size) and the config allows it.
+        if (config.@"window-inherit-font-size" and p.font_size_adjusted) {
+            copy.@"font-size" = p.font_size.points;
+        }
     }
 
     return copy;

@@ -220,7 +220,7 @@ pub fn run(self: *App) !void {
 
     // Enter the Win32 message loop
     var msg: w32.MSG = undefined;
-    while (true) {
+    loop: while (true) {
         const result = w32.GetMessageW(&msg, null, 0, 0);
         if (result == 0) {
             // WM_QUIT received. Check if it's still wanted — stopQuitTimer()
@@ -244,9 +244,25 @@ pub fn run(self: *App) !void {
             continue;
         }
 
-        // Intercept keystrokes destined for the search edit control so
-        // Enter/Escape can navigate matches or close the search bar.
+        // Intercept keystrokes destined for popup edit controls so
+        // Enter/Escape/Arrow keys can be handled by our code.
         if (msg.message == w32.WM_KEYDOWN and msg.hwnd != null) {
+            const vk: u16 = @intCast(msg.wParam & 0xFFFF);
+
+            // Check if this edit is a tab rename edit
+            if (vk == w32.VK_RETURN or vk == w32.VK_ESCAPE) {
+                for (self.windows.items) |win| {
+                    if (win.rename_edit != null and win.rename_edit.? == msg.hwnd) {
+                        if (vk == w32.VK_RETURN) {
+                            win.finishTabRename();
+                        } else {
+                            win.cancelTabRename();
+                        }
+                        continue :loop;
+                    }
+                }
+            }
+
             // Find the parent surface of this edit control
             const parent = w32.GetParent(msg.hwnd.?);
             if (parent) |p| {
@@ -254,8 +270,10 @@ pub fn run(self: *App) !void {
                 if (userdata != 0) {
                     const surface: *Surface = @ptrFromInt(@as(usize, @bitCast(userdata)));
                     if (surface.search_active and surface.search_edit == msg.hwnd) {
-                        const vk: u16 = @intCast(msg.wParam & 0xFFFF);
                         if (surface.handleSearchKey(vk)) continue;
+                    }
+                    if (surface.palette_active and surface.palette_edit == msg.hwnd) {
+                        if (surface.handlePaletteKey(vk)) continue;
                     }
                 }
             }
@@ -824,7 +842,6 @@ pub fn performAction(
         .key_table,
         .toggle_visibility,
         .present_terminal,
-        .prompt_title,
         .pwd,
         .color_change,
         .cell_size,
@@ -833,6 +850,15 @@ pub fn performAction(
         .command_finished,
         .readonly,
         .float_window,
+        // Platform-specific actions that don't apply on Windows:
+        .secure_input, // macOS EnableSecureEventInput
+        .undo, // macOS NSUndoManager
+        .redo, // macOS NSUndoManager
+        .check_for_updates, // macOS Sparkle framework
+        .show_gtk_inspector, // GTK-only
+        .show_on_screen_keyboard, // GTK/mobile
+        .inspector, // Not yet implemented (debug overlay)
+        .render_inspector, // Not yet implemented (debug overlay)
         => return true,
 
         .new_split => {
@@ -893,6 +919,32 @@ pub fn performAction(
             return true;
         },
 
+        .prompt_title => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    // Both .tab and .surface trigger inline rename on the
+                    // current tab. On Win32 there's no separate surface title
+                    // UI — the tab title IS the surface identity.
+                    core_surface.rt_surface.parent_window.startTabRename(
+                        core_surface.rt_surface.parent_window.active_tab,
+                    );
+                },
+            }
+            return true;
+        },
+
+        .toggle_command_palette => {
+            switch (target) {
+                .app => {},
+                .surface => |core_surface| {
+                    const active = core_surface.rt_surface.palette_active;
+                    core_surface.rt_surface.setCommandPaletteActive(!active);
+                },
+            }
+            return true;
+        },
+
         .toggle_quick_terminal => {
             if (self.quick_terminal) |qt| {
                 qt.toggle();
@@ -907,8 +959,7 @@ pub fn performAction(
             return true;
         },
 
-        // Return false for unhandled actions
-        else => return false,
+        // All 65 apprt actions are now handled above.
     }
 }
 
@@ -1118,10 +1169,11 @@ fn surfaceWndProc(
     else
         return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
-    // Guard: verify this is a surface window or its search popup.
+    // Guard: verify this is a surface window or one of its popups.
     const is_surface_window = surface.hwnd != null and surface.hwnd.? == hwnd;
     const is_search_popup = surface.search_hwnd != null and surface.search_hwnd.? == hwnd;
-    if (!is_surface_window and !is_search_popup)
+    const is_palette_popup = surface.palette_hwnd != null and surface.palette_hwnd.? == hwnd;
+    if (!is_surface_window and !is_search_popup and !is_palette_popup)
         return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
 
     switch (msg) {
@@ -1175,6 +1227,10 @@ fn surfaceWndProc(
         },
 
         w32.WM_PAINT => {
+            if (is_palette_popup) {
+                surface.paintPalette(hwnd);
+                return 0;
+            }
             // Validate the paint region to stop Windows from
             // sending more WM_PAINT messages, then wake the
             // renderer thread to redraw.
@@ -1243,7 +1299,24 @@ fn surfaceWndProc(
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
 
-        w32.WM_LBUTTONDOWN => { surface.handleMouseButton(.left, .press, lparam); return 0; },
+        w32.WM_LBUTTONDOWN => {
+            if (is_palette_popup) {
+                const y: i32 = @intCast(@as(i16, @truncate((lparam >> 16) & 0xFFFF)));
+                const sc = surface.scale;
+                const list_top: i32 = @intFromFloat(@round(Surface.PALETTE_LIST_TOP * sc));
+                const item_height: i32 = @intFromFloat(@round(Surface.PALETTE_ITEM_HEIGHT * sc));
+                if (y >= list_top) {
+                    const clicked = @divTrunc(y - list_top, item_height);
+                    if (clicked >= 0 and clicked < surface.palette_count) {
+                        surface.palette_selected = @intCast(clicked);
+                        surface.executePaletteSelection();
+                    }
+                }
+                return 0;
+            }
+            surface.handleMouseButton(.left, .press, lparam);
+            return 0;
+        },
         w32.WM_LBUTTONUP => { surface.handleMouseButton(.left, .release, lparam); return 0; },
         w32.WM_RBUTTONDOWN => { surface.handleMouseButton(.right, .press, lparam); return 0; },
         w32.WM_RBUTTONUP => { surface.handleMouseButton(.right, .release, lparam); return 0; },
@@ -1282,16 +1355,37 @@ fn surfaceWndProc(
                 surface.handleSearchChange();
                 return 0;
             }
+            if (control_id == Surface.PALETTE_EDIT_ID and notification == w32.EN_CHANGE) {
+                surface.handlePaletteChange();
+                return 0;
+            }
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
 
         w32.WM_CTLCOLOREDIT => {
-            // Dark mode colors for the search edit control
+            // Dark mode colors for search/palette edit controls
             const hdc_edit: w32.HDC = @ptrFromInt(wparam);
             _ = w32.SetTextColor(hdc_edit, w32.RGB(220, 220, 220));
-            _ = w32.SetBkColor(hdc_edit, w32.RGB(45, 45, 45));
+            _ = w32.SetBkColor(hdc_edit, if (is_palette_popup) w32.RGB(30, 30, 30) else w32.RGB(45, 45, 45));
+            if (is_palette_popup) {
+                if (surface.palette_brush) |brush| {
+                    return @bitCast(@intFromPtr(@as(*const anyopaque, @ptrCast(brush))));
+                }
+            }
             if (surface.app.bg_brush) |brush| {
                 return @bitCast(@intFromPtr(@as(*const anyopaque, @ptrCast(brush))));
+            }
+            return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
+        },
+
+        w32.WM_ACTIVATE => {
+            // Dismiss command palette when it loses focus
+            if (is_palette_popup) {
+                const activate = @as(u16, @intCast(wparam & 0xFFFF));
+                if (activate == 0) { // WA_INACTIVE
+                    surface.setCommandPaletteActive(false);
+                }
+                return 0;
             }
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },

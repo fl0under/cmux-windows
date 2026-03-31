@@ -75,6 +75,8 @@ pub const CoreText = struct {
 /// DirectWrite specific data. This is only present when building for Windows
 /// with the freetype backend.
 pub const DirectWriteFace = struct {
+    const dw = @import("directwrite.zig");
+
     /// Allocator used to allocate the path (needed for cleanup).
     alloc: Allocator,
 
@@ -87,9 +89,18 @@ pub const DirectWriteFace = struct {
     /// Variations to apply to this font.
     variations: []const font.face.Variation,
 
+    /// The DirectWrite font object, retained for codepoint checks.
+    font_obj: *dw.IDWriteFont,
+
     pub fn deinit(self: *DirectWriteFace) void {
+        self.font_obj.release();
         self.alloc.free(self.path);
         self.* = undefined;
+    }
+
+    /// Check if this font contains a glyph for the given codepoint.
+    pub fn hasCharacter(self: *const DirectWriteFace, codepoint: u32) bool {
+        return self.font_obj.hasCharacter(codepoint) catch false;
     }
 };
 
@@ -389,9 +400,7 @@ pub fn hasCodepoint(self: DeferredFace, cp: u32, p: ?Presentation) bool {
         },
 
         .freetype => if (comptime builtin.os.tag == .windows) {
-            // For DirectWrite discovered fonts, the discovery already
-            // filtered by codepoint if requested, so we return true.
-            if (self.dw != null) return true;
+            if (self.dw) |dw_face| return dw_face.hasCharacter(cp);
         },
     }
 

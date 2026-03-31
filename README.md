@@ -27,7 +27,7 @@ The goal is to track the upstream main branch while maintaining a native Windows
 
 ## Status
 
-**Functional proof-of-concept** — the terminal works for daily use but some features are still missing.
+**Feature-complete** — 100% apprt action coverage (65/65 actions handled). The terminal is ready for daily use.
 
 ### Working
 
@@ -67,7 +67,10 @@ The goal is to track the upstream main branch while maintaining a native Windows
   - New-tab (+) button, click to switch tabs, Ctrl+Shift+PgUp/PgDn navigation
   - Tab titles from shell, `window-new-tab-position` and `window-show-tab-bar` configs
   - Move tab left/right (`move_tab` action with wrapping)
+  - Drag-and-drop tab reorder (mouse drag tabs to rearrange)
+  - Inline tab rename (double-click tab to edit title, or `prompt_tab_title` action)
   - Close tab modes: current, all others, all to the right (`close_tab` with modes)
+  - Right-click context menu (Close, Close Others, Close to Right, New Tab)
 - Split panes using the core `SplitTree` data structure (same as GTK)
   - Split right (Ctrl+Shift+O), split down (Ctrl+Shift+E)
   - Navigate between panes (Ctrl+Shift+[ / ], or directional via keybindings)
@@ -78,11 +81,19 @@ The goal is to track the upstream main branch while maintaining a native Windows
   - Double-click divider to equalize that split
   - Splits are per-tab — each tab has its own independent split tree
 
-### Not Yet Implemented
+- Command palette (Ctrl+Shift+P) — filterable list of all actions with keybinding hints
+- Quick terminal (toggle with global hotkey) — slide-in/out from any screen edge
+- Font size inheritance (`window-inherit-font-size`) — new tabs/splits keep adjusted font size
+- DPI-scaled popups (search bar, command palette scale with display DPI)
+- Themes (463 built-in themes, same as macOS — requires `bin/share` directory layout)
 
-- Tab drag reorder, tab context menu, tab colors
-- Quick terminal, command palette, inspector
-- Release build + installer (MSI/MSIX)
+### Platform-Specific Notes
+
+- Inspector (debug overlay) — acknowledged but no Win32 UI yet
+- `undo`/`redo` — macOS NSUndoManager only, no Win32 equivalent
+- `check_for_updates` — macOS Sparkle framework only
+- `secure_input` — macOS EnableSecureEventInput only
+- Release build + installer (MSI/MSIX) — not yet packaged
 
 ## Building
 
@@ -138,10 +149,11 @@ The Windows port adds a `win32` application runtime (`src/apprt/win32/`) alongsi
 
 ```
 src/apprt/win32/
-  App.zig       — Win32 message loop, window classes, action dispatch
-  Window.zig    — Top-level container HWND, tab bar, tab lifecycle
-  Surface.zig   — WS_CHILD HWND, WGL context, input translation, clipboard
-  win32.zig     — Win32 API type definitions and extern declarations
+  App.zig             — Win32 message loop, window classes, action dispatch
+  Window.zig          — Top-level container HWND, tab bar, splits, tab lifecycle
+  Surface.zig         — WS_CHILD HWND, WGL context, input, clipboard, search, command palette
+  QuickTerminal.zig   — Quick terminal popup with slide animation
+  win32.zig           — Win32 API type definitions and extern declarations
 
 src/shell-integration/powershell/
   ghostty-shell-integration.ps1  — PowerShell prompt marking, CWD, title
@@ -155,7 +167,7 @@ A test harness runs from WSL2 using PowerShell automation:
 bash test/win32/ghostty_test.sh all
 ```
 
-Tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config file loading, scrollbar, close confirmation, URL detection, desktop notifications, tabs, and splits.
+25 automated tests cover: launch/close, window properties, keyboard input, multiple windows, clipboard, config loading, scrollbar, close confirmation, URL detection, notifications, window sizing, search bar, config reload, tabs (new/switch/close), opacity, command palette, tab drag reorder, inline tab rename, split panes, font zoom, fullscreen toggle, open config, and quick terminal.
 
 Tab and split tests run in PowerShell sessions:
 

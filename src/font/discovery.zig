@@ -270,6 +270,7 @@ pub const DirectWrite = struct {
         var results: std.ArrayList(FontResult) = .empty;
         errdefer {
             for (results.items) |r| {
+                r.font_obj.release();
                 if (r.path.len > 0) alloc.free(r.path);
                 if (r.family_name.len > 0) alloc.free(r.family_name);
             }
@@ -338,12 +339,17 @@ pub const DirectWrite = struct {
                 defer family_names.release();
                 const name = family_names.getLocalizedName(alloc) catch alloc.dupeZ(u8, family) catch continue;
 
+                // AddRef to create a second reference for the result
+                // (defer above releases our local reference)
+                font_obj.addRef();
+                errdefer font_obj.release();
                 try results.append(alloc, .{
                     .path = result.path,
                     .face_index = result.face_index,
                     .weight = weight,
                     .style = style,
                     .family_name = name,
+                    .font_obj = font_obj,
                 });
             } else |_| {
                 continue;
@@ -379,12 +385,15 @@ pub const DirectWrite = struct {
                     defer family_names.release();
                     const name = family_names.getLocalizedName(alloc) catch continue;
 
+                    font_obj.addRef();
+                    errdefer font_obj.release();
                     try results.append(alloc, .{
                         .path = result.path,
                         .face_index = result.face_index,
                         .weight = weight,
                         .style = style,
                         .family_name = name,
+                        .font_obj = font_obj,
                     });
                 } else |_| {
                     continue;
@@ -477,6 +486,8 @@ pub const DirectWrite = struct {
         weight: dw.DWRITE_FONT_WEIGHT,
         style: dw.DWRITE_FONT_STYLE,
         family_name: [:0]const u8,
+        /// Retained IDWriteFont for codepoint checks in DeferredFace.
+        font_obj: *dw.IDWriteFont,
     };
 
     pub const DiscoverIterator = struct {
@@ -487,6 +498,7 @@ pub const DirectWrite = struct {
 
         pub fn deinit(self: *DiscoverIterator) void {
             for (self.results) |r| {
+                r.font_obj.release();
                 if (r.path.len > 0) self.alloc.free(r.path);
                 if (r.family_name.len > 0) self.alloc.free(r.family_name);
             }
@@ -499,10 +511,14 @@ pub const DirectWrite = struct {
             const result = &self.results[self.i];
             self.i += 1;
 
-            // Transfer ownership of the path to the deferred face
+            // Transfer ownership of the path and font_obj to the deferred face.
+            // The font_obj COM pointer is already AddRef'd from discovery.
             const path = result.path;
             const face_index = result.face_index;
+            const font_obj = result.font_obj;
             result.path = @ptrCast("");
+            // AddRef again so the result still has a valid ref for cleanup
+            font_obj.addRef();
 
             return DeferredFace{
                 .dw = .{
@@ -510,6 +526,7 @@ pub const DirectWrite = struct {
                     .path = path,
                     .face_index = face_index,
                     .variations = self.variations,
+                    .font_obj = font_obj,
                 },
             };
         }

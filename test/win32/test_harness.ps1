@@ -134,16 +134,14 @@ function Invoke-Launch {
         else { throw "ghostty.exe not found. Specify -ExePath." }
     }
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    if ($Args) { $psi.Arguments = $Args }
-    $psi.UseShellExecute = $false
-    # Redirect stderr so ghostty debug output doesn't corrupt harness output.
-    $psi.RedirectStandardError = $true
-
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    # Begin async read so the stderr buffer doesn't fill and block the process.
-    $proc.BeginErrorReadLine()
+    # Use Start-Process -PassThru instead of ProcessStartInfo with
+    # RedirectStandardError. Stderr redirect can hang on debug builds
+    # and even on release builds when ConPTY produces debug output.
+    if ($Args) {
+        $proc = Start-Process -FilePath $exe -ArgumentList $Args -PassThru
+    } else {
+        $proc = Start-Process -FilePath $exe -PassThru
+    }
     Write-Output "PID=$($proc.Id)"
 
     # Wait for window to appear

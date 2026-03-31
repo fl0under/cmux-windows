@@ -54,6 +54,18 @@ hover_close: bool = false,
 /// Whether the "+" (new tab) button is being hovered.
 hover_new_tab: bool = false,
 
+/// Tab drag state: which tab is being dragged (-1 = none).
+drag_tab: isize = -1,
+/// Starting X position of the drag.
+drag_start_x: i16 = 0,
+/// Whether the drag has exceeded the threshold and is active.
+drag_active: bool = false,
+
+/// Inline tab rename: Edit control HWND, font, and target tab index.
+rename_edit: ?w32.HWND = null,
+rename_font: ?*anyopaque = null,
+rename_tab: usize = 0,
+
 /// UTF-16 title buffers for each tab (for painting the tab bar).
 tab_titles: [64][256]u16 = undefined,
 
@@ -251,10 +263,11 @@ fn findHandle(self: *Window, tab_idx: usize, surface: *Surface) ?SplitTree(Surfa
 /// initialized, and inserted at the position dictated by config.
 pub fn addTab(self: *Window) !*Surface {
     if (self.tab_count >= MAX_TABS) return error.TooManyTabs;
+    self.cancelTabRename();
 
     const alloc = self.app.core_app.alloc;
     const surface = try alloc.create(Surface);
-    try surface.init(self.app, self);
+    try surface.init(self.app, self, .tab);
     // After surface.init succeeds, create the SplitTree which takes ownership
     // via ref(). If this fails, we manually clean up.
     var tree = SplitTree(Surface).init(alloc, surface) catch |err| {
@@ -319,6 +332,8 @@ pub fn closeTab(self: *Window, surface: *Surface) void {
 
 fn closeTabByIndex(self: *Window, idx: usize) void {
     if (idx >= self.tab_count) return;
+    // Cancel any in-progress rename (the edit control may belong to this tab).
+    self.cancelTabRename();
     var tree = self.tab_trees[idx];
     tree.deinit(); // This unrefs all surfaces → Surface.unref frees when ref_count=0
     var i: usize = idx;
@@ -427,6 +442,13 @@ pub fn closeSplitSurface(self: *Window, surface: *Surface) void {
 /// Switch to the tab at the given index.
 pub fn selectTabIndex(self: *Window, idx: usize) void {
     if (idx >= self.tab_count) return;
+    self.cancelTabRename();
+    // Clear any in-progress tab drag
+    if (self.drag_tab >= 0) {
+        self.drag_tab = -1;
+        self.drag_active = false;
+        _ = w32.ReleaseCapture();
+    }
     if (self.active_tab < self.tab_count) {
         var it = self.tab_trees[self.active_tab].iterator();
         while (it.next()) |entry| {
@@ -657,7 +679,7 @@ pub fn newSplit(self: *Window, direction: SplitTree(Surface).Split.Direction) !v
         new_surface.deinit();
         alloc.destroy(new_surface);
     }
-    try new_surface.init(self.app, self);
+    try new_surface.init(self.app, self, .split);
 
     // Create a single-node tree for the new surface.
     var insert_tree = try SplitTree(Surface).init(alloc, new_surface);
@@ -1183,11 +1205,57 @@ fn handleTabBarClick(self: *Window, x: i16, y: i16) void {
                 self.closeTabByIndex(i);
             } else {
                 self.selectTabIndex(i);
+                // Start tracking potential tab drag
+                self.drag_tab = @intCast(i);
+                self.drag_start_x = x;
+                self.drag_active = false;
+                if (self.hwnd) |h| _ = w32.SetCapture(h);
                 self.invalidateTabBar();
             }
             return;
         }
     }
+}
+
+/// Move a tab from one index to another, shifting intermediate tabs.
+fn moveTabTo(self: *Window, from: usize, to: usize) void {
+    if (from == to) return;
+    if (from >= self.tab_count or to >= self.tab_count) return;
+
+    // Save the source tab state
+    const saved_tree = self.tab_trees[from];
+    const saved_surface = self.tab_active_surface[from];
+    const saved_title = self.tab_titles[from];
+    const saved_title_len = self.tab_title_lens[from];
+
+    if (from < to) {
+        // Shift left: move [from+1..to+1] to [from..to]
+        var i: usize = from;
+        while (i < to) : (i += 1) {
+            self.tab_trees[i] = self.tab_trees[i + 1];
+            self.tab_active_surface[i] = self.tab_active_surface[i + 1];
+            self.tab_titles[i] = self.tab_titles[i + 1];
+            self.tab_title_lens[i] = self.tab_title_lens[i + 1];
+        }
+    } else {
+        // Shift right: move [to..from] to [to+1..from+1]
+        var i: usize = from;
+        while (i > to) : (i -= 1) {
+            self.tab_trees[i] = self.tab_trees[i - 1];
+            self.tab_active_surface[i] = self.tab_active_surface[i - 1];
+            self.tab_titles[i] = self.tab_titles[i - 1];
+            self.tab_title_lens[i] = self.tab_title_lens[i - 1];
+        }
+    }
+
+    // Place the saved tab at the destination
+    self.tab_trees[to] = saved_tree;
+    self.tab_active_surface[to] = saved_surface;
+    self.tab_titles[to] = saved_title;
+    self.tab_title_lens[to] = saved_title_len;
+
+    self.active_tab = to;
+    self.invalidateTabBar();
 }
 
 /// Handle mouse movement over the tab bar for hover effects.
@@ -1332,6 +1400,104 @@ fn handleTabBarMouseLeave(self: *Window) void {
     }
 }
 
+/// Rename edit control child ID.
+const RENAME_EDIT_ID: u16 = 300;
+
+/// Start inline editing of a tab title. Creates a small Edit control
+/// overlay on the tab and pre-fills it with the current title.
+pub fn startTabRename(self: *Window, tab_idx: usize) void {
+    // Cancel any existing rename
+    self.cancelTabRename();
+
+    const hwnd = self.hwnd orelse return;
+    const rect = self.tab_rects[tab_idx];
+
+    // Create an Edit control overlaid on the tab
+    const edit = w32.CreateWindowExW(
+        0,
+        std.unicode.utf8ToUtf16LeStringLiteral("EDIT"),
+        @ptrCast(&self.tab_titles[tab_idx]),
+        w32.WS_CHILD | w32.WS_VISIBLE_STYLE | w32.ES_AUTOHSCROLL | w32.WS_BORDER,
+        rect.left + 2,
+        rect.top + 2,
+        rect.right - rect.left - 4,
+        rect.bottom - rect.top - 4,
+        hwnd,
+        @ptrFromInt(@as(usize, RENAME_EDIT_ID)),
+        self.app.hinstance,
+        null,
+    ) orelse return;
+
+    // Apply dark theme
+    const dark_mode: u32 = 1;
+    _ = w32.DwmSetWindowAttribute(
+        edit,
+        w32.DWMWA_USE_IMMERSIVE_DARK_MODE,
+        @ptrCast(&dark_mode),
+        @sizeOf(u32),
+    );
+    _ = w32.SetWindowTheme(
+        edit,
+        std.unicode.utf8ToUtf16LeStringLiteral("DarkMode_Explorer"),
+        null,
+    );
+
+    // Set font — stored for cleanup
+    self.rename_font = w32.CreateFontW(
+        -@as(i32, @intFromFloat(@round(12.0 * self.scale))),
+        0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0,
+        std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI"),
+    );
+    if (self.rename_font) |f| {
+        _ = w32.SendMessageW(edit, w32.WM_SETFONT, @intFromPtr(f), 1);
+    }
+
+    // Select all text
+    _ = w32.SendMessageW(edit, 0x00B1, 0, -1); // EM_SETSEL(0, -1)
+
+    _ = w32.SetFocus(edit);
+    self.rename_edit = edit;
+    self.rename_tab = tab_idx;
+}
+
+/// Apply the edit text as the new tab title and destroy the edit control.
+pub fn finishTabRename(self: *Window) void {
+    const edit = self.rename_edit orelse return;
+    const tab_idx = self.rename_tab;
+
+    // Read the edit control text
+    var wbuf: [256]u16 = undefined;
+    const wlen: usize = @intCast(w32.GetWindowTextW(edit, &wbuf, 256));
+    if (wlen > 0) {
+        const len: u16 = @intCast(@min(wlen, 255));
+        @memcpy(self.tab_titles[tab_idx][0..len], wbuf[0..len]);
+        self.tab_title_lens[tab_idx] = len;
+        if (tab_idx == self.active_tab) self.updateWindowTitle();
+    }
+
+    _ = w32.DestroyWindow(edit);
+    self.rename_edit = null;
+    if (self.rename_font) |f| { _ = w32.DeleteObject(f); self.rename_font = null; }
+    self.invalidateTabBar();
+
+    // Return focus to the active surface
+    if (self.getActiveSurface()) |s| {
+        if (s.hwnd) |h| _ = w32.SetFocus(h);
+    }
+}
+
+/// Cancel inline rename without applying changes.
+pub fn cancelTabRename(self: *Window) void {
+    if (self.rename_edit) |edit| {
+        _ = w32.DestroyWindow(edit);
+        self.rename_edit = null;
+        if (self.rename_font) |f| { _ = w32.DeleteObject(f); self.rename_font = null; }
+        if (self.getActiveSurface()) |s| {
+            if (s.hwnd) |h| _ = w32.SetFocus(h);
+        }
+    }
+}
+
 /// Handle WM_CLOSE: clean up all tabs, then destroy the window.
 /// OpenGL contexts and DCs must be released BEFORE DestroyWindow,
 /// because Win32 destroys child HWNDs during DestroyWindow and the
@@ -1472,11 +1638,28 @@ pub fn windowWndProc(
                 window.endDividerDrag();
                 return 0;
             }
+            if (window.drag_tab >= 0) {
+                window.drag_tab = -1;
+                window.drag_active = false;
+                _ = w32.ReleaseCapture();
+                return 0;
+            }
             return 0;
         },
         w32.WM_LBUTTONDBLCLK => {
             const x: i32 = @as(i16, @truncate(lparam & 0xFFFF));
             const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
+            // Double-click on tab bar starts inline rename
+            if (y < window.tabBarHeight()) {
+                for (0..window.tab_count) |i| {
+                    const rect = window.tab_rects[i];
+                    if (x >= rect.left and x < rect.right) {
+                        window.startTabRename(i);
+                        return 0;
+                    }
+                }
+                return 0;
+            }
             if (window.hitTestDivider(x, y)) |hit| {
                 window.tab_trees[window.active_tab].resizeInPlace(hit.handle, @as(f16, 0.5));
                 window.layoutSplits();
@@ -1498,6 +1681,32 @@ pub fn windowWndProc(
             const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
             if (window.dragging_split) {
                 window.updateDividerDrag(x, y);
+                return 0;
+            }
+            // Handle tab drag reorder
+            if (window.drag_tab >= 0) {
+                const xi16: i16 = @truncate(x);
+                const dx = if (xi16 > window.drag_start_x) xi16 - window.drag_start_x else window.drag_start_x - xi16;
+                if (!window.drag_active and dx > 5) {
+                    window.drag_active = true;
+                }
+                if (window.drag_active) {
+                    // Find which tab position the mouse is over by checking
+                    // midpoints. If mouse is past a tab's midpoint, the
+                    // dragged tab should go after it.
+                    const from: usize = @intCast(window.drag_tab);
+                    var target: usize = 0;
+                    for (0..window.tab_count) |i| {
+                        const mid = @divTrunc(window.tab_rects[i].left + window.tab_rects[i].right, 2);
+                        if (x >= mid) {
+                            target = i;
+                        }
+                    }
+                    if (target != from) {
+                        window.moveTabTo(from, target);
+                        window.drag_tab = @intCast(target);
+                    }
+                }
                 return 0;
             }
             if (y < window.tabBarHeight()) {

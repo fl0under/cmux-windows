@@ -96,10 +96,7 @@ function Count-ChildWindows($proc, $className) {
 }
 
 function Launch-Ghostty {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $ExePath
-    $psi.UseShellExecute = $true  # UseShellExecute so it gets its own window properly
-    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc = Start-Process -FilePath $ExePath -PassThru
 
     # Wait for main window
     for ($i = 0; $i -lt 40; $i++) {

@@ -74,20 +74,18 @@ function Count-GhosttyWindows($pid) {
 }
 
 function Launch-Ghostty {
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $ExePath
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardError = $true
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $proc.BeginErrorReadLine()
+    $proc = Start-Process -FilePath $ExePath -PassThru
 
     # Wait for main window
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 200
         $proc.Refresh()
-        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) { return $proc }
+        if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {
+            Start-Sleep -Seconds 1
+            return $proc
+        }
     }
-    Write-Output "  WARN: Window handle not found after 6s"
+    Write-Output "  WARN: Window handle not found after 8s"
     return $proc
 }
 
