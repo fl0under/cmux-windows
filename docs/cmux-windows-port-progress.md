@@ -239,9 +239,9 @@ Current behavior:
 
 ### 10. Sidebar Direct2D/DirectWrite renderer brought online
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - Direct2D/DirectWrite sidebar path with GDI fallback retained
+- `f1cfeeeac` - `feat(win32): add sidebar direct2d fallback path`
 
 What landed in this slice:
 
