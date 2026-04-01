@@ -383,6 +383,10 @@ pub extern "user32" fn GetClientRect(
     lpRect: *RECT,
 ) callconv(.c) i32;
 
+pub extern "kernel32" fn GetProcessId(
+    Process: std.os.windows.HANDLE,
+) callconv(.winapi) u32;
+
 pub extern "user32" fn GetDC(
     hWnd: ?HWND,
 ) callconv(.c) ?HDC;

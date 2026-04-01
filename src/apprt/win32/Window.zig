@@ -3,6 +3,7 @@
 //! bar, tab switching, and window-level state (fullscreen, DPI scale).
 const Window = @This();
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const apprt = @import("../../apprt.zig");
@@ -11,7 +12,12 @@ const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
+const Theme = @import("../../cmux/ui/Theme.zig").Theme;
 const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
+const Workspace = @import("../../cmux/workspace/Workspace.zig").Workspace;
+const GitStatus = @import("../../cmux/git/GitStatus.zig").GitStatus;
+const PortScanner = @import("../../cmux/git/PortScanner.zig").PortScanner;
+const ProcessInfo = @import("../../pty.zig").ProcessInfo;
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -74,6 +80,7 @@ drag_active: bool = false,
 rename_edit: ?w32.HWND = null,
 rename_font: ?*anyopaque = null,
 rename_tab: usize = 0,
+rename_sidebar_mode: bool = false,
 
 /// UTF-16 title buffers for each tab (for painting the tab bar).
 tab_titles: [64][256]u16 = undefined,
@@ -350,6 +357,7 @@ pub fn addTab(self: *Window) !*Surface {
         var title_buf: [64]u8 = undefined;
         const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
         self.sidebar_tabs[pos] = SidebarTab.init(default_name);
+        self.refreshSidebarRuntimeMetadata(pos);
         self.sidebar_tabs[pos].is_active = (pos == self.active_tab);
         if (pos >= sidebar.tabs.items.len) {
             _ = sidebar.addTab(default_name) catch {};
@@ -364,6 +372,63 @@ pub fn addTab(self: *Window) !*Surface {
 
     self.updateTabBarVisibility();
     return surface;
+}
+
+fn detectSidebarShellTypeFromSurface(self: *const Window, surface: *const Surface) SidebarTab.ShellType {
+    const backend = &surface.core_surface.io.backend;
+    return switch (backend.*) {
+        .exec => |*exec| blk: {
+            if (exec.subprocess.args.len == 0) break :blk .cmd;
+
+            const argv0 = std.mem.span(exec.subprocess.args[0]);
+            const last_sep = std.mem.lastIndexOfAny(u8, argv0, "/\\");
+            const basename = if (last_sep) |idx| argv0[idx + 1 ..] else argv0;
+            const shell_type = Workspace.ShellType.fromCommand(basename);
+
+            if (shell_type != .custom) break :blk shell_type.toTabShellType();
+
+            var joined = std.ArrayList(u8).init(self.app.core_app.alloc);
+            defer joined.deinit();
+            for (exec.subprocess.args, 0..) |arg, idx| {
+                if (idx > 0) joined.append(' ') catch break;
+                joined.appendSlice(std.mem.span(arg)) catch break;
+            }
+            break :blk Workspace.ShellType.fromCommand(joined.items).toTabShellType();
+        },
+    };
+}
+
+fn refreshSidebarRuntimeMetadata(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    const surface = self.getTabActiveSurface(tab_idx) orelse return;
+    self.sidebar_tabs[tab_idx].shell_type = self.detectSidebarShellTypeFromSurface(surface);
+    self.refreshSidebarPortMetadata(tab_idx, surface);
+}
+
+fn refreshSidebarPortMetadata(self: *Window, tab_idx: usize, surface: *const Surface) void {
+    self.sidebar_tabs[tab_idx].clearPorts();
+
+    const port_owner_pid = switch (surface.core_surface.io.backend) {
+        .exec => |*exec| blk: {
+            if (exec.subprocess.process) |proc| switch (proc) {
+                .fork_exec => |cmd| {
+                    if (builtin.os.tag == .windows) {
+                        if (cmd.pid) |process_handle| {
+                            const pid = w32.GetProcessId(process_handle);
+                            if (pid != 0) break :blk pid;
+                        }
+                    }
+                },
+                .flatpak => {},
+            };
+            break :blk null;
+        },
+    };
+
+    var port_scanner = PortScanner.init(self.app.core_app.alloc);
+    const ports = port_scanner.scanInterestingPortsForPidTree(port_owner_pid) catch return;
+    defer self.app.core_app.alloc.free(ports);
+    for (ports) |port| self.sidebar_tabs[tab_idx].addPort(port);
 }
 
 /// Close a tab by surface pointer. Removes from the tab list,
@@ -511,6 +576,7 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     if (surface.hwnd) |h| _ = w32.SetFocus(h);
     self.updateWindowTitle();
     if (self.sidebar) |*sidebar| {
+        self.refreshSidebarRuntimeMetadata(idx);
         for (0..self.tab_count) |i| {
             self.sidebar_tabs[i].is_active = (i == idx);
         }
@@ -989,9 +1055,54 @@ pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) v
 pub fn setSidebarCwd(self: *Window, tab_idx: usize, cwd: []const u8) void {
     if (tab_idx >= self.tab_count) return;
     self.sidebar_tabs[tab_idx].setCwd(cwd);
+    self.refreshSidebarRuntimeMetadata(tab_idx);
+    self.refreshSidebarGitMetadata(tab_idx);
     if (self.sidebar) |*sidebar| {
         sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
     }
+}
+
+fn refreshSidebarGitMetadata(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    const cwd = self.sidebar_tabs[tab_idx].getCwd();
+    if (cwd.len == 0) {
+        self.sidebar_tabs[tab_idx].setGitBranch("");
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    }
+
+    const is_wsl = self.sidebar_tabs[tab_idx].shell_type == .wsl;
+    var git_status = GitStatus.init(self.app.core_app.alloc);
+    const branch = git_status.getBranch(cwd, is_wsl) catch {
+        self.sidebar_tabs[tab_idx].setGitBranch("");
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer self.app.core_app.alloc.free(branch);
+    self.sidebar_tabs[tab_idx].setGitBranch(branch);
+
+    const pr_status = git_status.getPrStatus(cwd, is_wsl) catch {
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer self.app.core_app.alloc.free(pr_status);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, self.app.core_app.alloc, pr_status, .{}) catch {
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("number")) |number_value| {
+            switch (number_value) {
+                .integer => |number| self.sidebar_tabs[tab_idx].pr_number = @intCast(@max(number, 0)),
+                else => self.sidebar_tabs[tab_idx].pr_number = 0,
+            }
+            return;
+        }
+    }
+    self.sidebar_tabs[tab_idx].pr_number = 0;
 }
 
 pub fn markSidebarRead(self: *Window, tab_idx: usize) void {
@@ -1065,6 +1176,9 @@ fn updateTabBarVisibility(self: *Window) void {
 pub fn invalidateTabBar(self: *Window) void {
     if (self.sidebar) |*sidebar| {
         sidebar.setActiveTab(self.active_tab);
+        if (sidebar.hwnd) |hwnd| {
+            _ = w32.InvalidateRect(hwnd, null, 0);
+        }
         return;
     }
     const hwnd = self.hwnd orelse return;
@@ -1357,6 +1471,24 @@ fn handleResize(self: *Window) void {
             sidebar.resize(rect.bottom - rect.top);
         }
     }
+    if (self.rename_sidebar_mode) {
+        if (self.rename_edit) |edit| {
+            const rect = self.sidebarRenameRect(self.rename_tab) orelse {
+                self.cancelTabRename();
+                self.layoutSplits();
+                self.invalidateTabBar();
+                return;
+            };
+            _ = w32.MoveWindow(
+                edit,
+                rect.left + 2,
+                rect.top + 2,
+                rect.right - rect.left - 4,
+                rect.bottom - rect.top - 4,
+                1,
+            );
+        }
+    }
     self.layoutSplits();
     self.invalidateTabBar();
 }
@@ -1411,6 +1543,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
     const saved_surface = self.tab_active_surface[from];
     const saved_title = self.tab_titles[from];
     const saved_title_len = self.tab_title_lens[from];
+    const saved_sidebar_tab = self.sidebar_tabs[from];
 
     if (from < to) {
         // Shift left: move [from+1..to+1] to [from..to]
@@ -1420,6 +1553,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
             self.tab_active_surface[i] = self.tab_active_surface[i + 1];
             self.tab_titles[i] = self.tab_titles[i + 1];
             self.tab_title_lens[i] = self.tab_title_lens[i + 1];
+            self.sidebar_tabs[i] = self.sidebar_tabs[i + 1];
         }
     } else {
         // Shift right: move [to..from] to [to+1..from+1]
@@ -1429,6 +1563,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
             self.tab_active_surface[i] = self.tab_active_surface[i - 1];
             self.tab_titles[i] = self.tab_titles[i - 1];
             self.tab_title_lens[i] = self.tab_title_lens[i - 1];
+            self.sidebar_tabs[i] = self.sidebar_tabs[i - 1];
         }
     }
 
@@ -1437,11 +1572,18 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
     self.tab_active_surface[to] = saved_surface;
     self.tab_titles[to] = saved_title;
     self.tab_title_lens[to] = saved_title_len;
+    self.sidebar_tabs[to] = saved_sidebar_tab;
 
     self.active_tab = to;
+    for (0..self.tab_count) |i| {
+        self.sidebar_tabs[i].is_active = (i == self.active_tab);
+    }
     if (self.sidebar) |*sidebar| {
         sidebar.reorderTab(from, to);
         sidebar.setActiveTab(self.active_tab);
+        for (0..self.tab_count) |i| {
+            sidebar.updateTab(i, self.sidebar_tabs[i]);
+        }
     }
     self.invalidateTabBar();
 }
@@ -1581,6 +1723,7 @@ fn handleTabBarRightClick(self: *Window, x: i16, y: i16) void {
 
 /// Handle WM_MOUSELEAVE: reset all hover state and repaint.
 fn handleTabBarMouseLeave(self: *Window) void {
+    if (self.sidebar != null) return;
     self.tracking_mouse = false;
     if (self.hover_tab != -1 or self.hover_new_tab) {
         self.hover_tab = -1;
@@ -1593,14 +1736,43 @@ fn handleTabBarMouseLeave(self: *Window) void {
 /// Rename edit control child ID.
 const RENAME_EDIT_ID: u16 = 300;
 
+fn sidebarRenameRect(self: *Window, tab_idx: usize) ?w32.RECT {
+    const sidebar = self.sidebar orelse return null;
+    if (tab_idx >= self.tab_count or tab_idx >= sidebar.tabs.items.len) return null;
+
+    const scaled_width = sidebar.getWidth();
+    if (scaled_width <= 0) return null;
+
+    const tab_h = Theme.scaled(Theme.sidebar_tab_height, sidebar.scale);
+    const padding = Theme.scaled(Theme.sidebar_tab_padding, sidebar.scale);
+    const header_height = @as(i32, @intFromFloat(40.0 * sidebar.scale));
+    const y = header_height + @as(i32, @intCast(tab_idx)) * tab_h + sidebar.scroll_offset;
+    const right = scaled_width - (padding * 2) - Theme.scaled(Theme.notification_badge_size, sidebar.scale) - 6;
+    const bottom = y + tab_h - padding - 22;
+
+    if (right <= padding + 6 or bottom <= y + 4) return null;
+
+    return .{
+        .left = padding + 6,
+        .top = y + 4,
+        .right = right,
+        .bottom = bottom,
+    };
+}
+
 /// Start inline editing of a tab title. Creates a small Edit control
 /// overlay on the tab and pre-fills it with the current title.
 pub fn startTabRename(self: *Window, tab_idx: usize) void {
     // Cancel any existing rename
     self.cancelTabRename();
+    if (tab_idx >= self.tab_count) return;
 
     const hwnd = self.hwnd orelse return;
-    const rect = self.tab_rects[tab_idx];
+    const use_sidebar_rect = self.sidebar != null;
+    const rect = if (use_sidebar_rect)
+        self.sidebarRenameRect(tab_idx) orelse return
+    else
+        self.tab_rects[tab_idx];
 
     // Create an Edit control overlaid on the tab
     const edit = w32.CreateWindowExW(
@@ -1659,6 +1831,7 @@ pub fn startTabRename(self: *Window, tab_idx: usize) void {
     _ = w32.SetFocus(edit);
     self.rename_edit = edit;
     self.rename_tab = tab_idx;
+    self.rename_sidebar_mode = use_sidebar_rect;
 }
 
 /// Apply the edit text as the new tab title and destroy the edit control.
@@ -1670,14 +1843,19 @@ pub fn finishTabRename(self: *Window) void {
     var wbuf: [256]u16 = undefined;
     const wlen: usize = @intCast(w32.GetWindowTextW(edit, &wbuf, 256));
     if (wlen > 0) {
-        const len: u16 = @intCast(@min(wlen, 255));
-        @memcpy(self.tab_titles[tab_idx][0..len], wbuf[0..len]);
-        self.tab_title_lens[tab_idx] = len;
-        if (tab_idx == self.active_tab) self.updateWindowTitle();
+        var utf8_buf: [256]u8 = undefined;
+        const title = std.unicode.utf16LeToUtf8(&utf8_buf, wbuf[0..wlen]) catch utf8_buf[0..0];
+        if (title.len > 0) {
+            var title_z_buf: [257]u8 = undefined;
+            @memcpy(title_z_buf[0..title.len], title);
+            title_z_buf[title.len] = 0;
+            self.renameTabIndex(tab_idx, title_z_buf[0..title.len :0]);
+        }
     }
 
     _ = w32.DestroyWindow(edit);
     self.rename_edit = null;
+    self.rename_sidebar_mode = false;
     if (self.rename_font) |f| {
         _ = w32.DeleteObject(f);
         self.rename_font = null;
@@ -1695,6 +1873,7 @@ pub fn cancelTabRename(self: *Window) void {
     if (self.rename_edit) |edit| {
         _ = w32.DestroyWindow(edit);
         self.rename_edit = null;
+        self.rename_sidebar_mode = false;
         if (self.rename_font) |f| {
             _ = w32.DeleteObject(f);
             self.rename_font = null;
@@ -1819,7 +1998,15 @@ pub fn windowWndProc(
             return 0;
         },
         w32.WM_PAINT => {
-            window.paintTabBar();
+            if (window.sidebar == null) {
+                window.paintTabBar();
+            } else {
+                var ps: w32.PAINTSTRUCT = undefined;
+                const hdc = w32.BeginPaint(hwnd, &ps);
+                if (hdc != null) {
+                    _ = w32.EndPaint(hwnd, &ps);
+                }
+            }
             return 0;
         },
         Sidebar.WM_CMUX_TAB_CLICKED => {
@@ -1843,6 +2030,11 @@ pub fn windowWndProc(
             const from: usize = @intCast((wparam >> 16) & 0xFFFF);
             const to: usize = @intCast(wparam & 0xFFFF);
             window.moveTabTo(from, to);
+            return 0;
+        },
+        Sidebar.WM_CMUX_TAB_CONTEXT => {
+            const tab_idx: usize = @intCast(wparam & 0xFFFF);
+            window.handleSidebarRightClick(tab_idx);
             return 0;
         },
         w32.WM_SETFOCUS => {
@@ -1968,7 +2160,9 @@ pub fn windowWndProc(
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         w32.WM_MOUSELEAVE => {
-            window.handleTabBarMouseLeave();
+            if (window.sidebar == null) {
+                window.handleTabBarMouseLeave();
+            }
             return 0;
         },
         w32.WM_ACTIVATE => {

@@ -6,7 +6,7 @@ passes can resume quickly and keep the summary up to date.
 ## Last updated
 
 - Date: 2026-04-01
-- Branch: `cursor/cmux-windows-feature-parity-a423`
+- Branch: `cursor/cmux-sidebar-features-a87b`
 
 ## Upstream reference
 
@@ -123,6 +123,139 @@ Current behavior:
 - Workspace titles and basic notification snippets can flow into the sidebar model
 - The sidebar remains a partial cmux port rather than a full metadata-complete implementation
 
+### 4. Sidebar interaction path promoted toward primary workspace chrome
+
+Implemented and committed in:
+
+- `b8ad8077f` - `feat(win32): promote sidebar workspace interactions`
+
+What landed in this slice:
+
+- Fixed `src/apprt/win32/Window.zig` tab moves so `sidebar_tabs` metadata now reorders with the live tab model
+- Added native drag-reorder handling inside `src/cmux/ui/Sidebar.zig`
+- Wired sidebar context-menu messages back into `Window.zig` so right-click actions are handled from the sidebar path
+- Expanded GDI sidebar rendering to show existing per-workspace metadata when available:
+  - git branch
+  - PR number
+  - listening ports
+- Added active-workspace accenting and sidebar/content separator polish in the interim GDI renderer
+
+Current behavior:
+
+- Sidebar reorder now updates both workspace position and mirrored sidebar metadata together
+- Right-click and drag interactions can flow through the sidebar itself instead of relying on top-tab assumptions
+- Sidebar now exposes more of the metadata already present in the workspace model, though live git/port discovery is still incomplete
+
+### 5. Sidebar rename path and git metadata wiring tightened
+
+Implemented and committed in:
+
+- `4fcd4fbbd` - `feat(win32): tighten sidebar rename and git metadata`
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` inline rename flow to use sidebar-relative geometry when the sidebar is the active workspace chrome
+- Switched rename commit handling to route through the existing tab-title update path so sidebar state stays synchronized
+- Added lightweight git/PR metadata refresh from live `pwd` updates using `src/cmux/git/GitStatus.zig`
+- Kept the legacy top-tab rename path intact for non-sidebar cases while making the sidebar path the primary visible one
+
+Current behavior:
+
+- Double-click rename from the sidebar now targets the visible sidebar workspace entry instead of hidden top-tab rectangles
+- Sidebar title updates continue to flow through the shared title-sync path used by the runtime
+- Sidebar git branch and PR number can now refresh from cwd changes for native git workspaces, though ports and shell-type detection are still incomplete
+
+### 6. Sidebar shell metadata surfaced in live workspace chrome
+
+Implemented and committed in:
+
+- `45edaab65` - `feat(win32): surface sidebar shell metadata`
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` to infer sidebar shell type from the configured launch command when new workspaces are created
+- Expanded `src/cmux/ui/Sidebar.zig` metadata rendering to show shell labels alongside git branch / PR / ports when available
+- Kept shell metadata wiring lightweight and local to the sidebar model without disturbing the underlying terminal launch path
+
+Current behavior:
+
+- New sidebar workspaces now expose shell-type metadata such as PowerShell, CMD, or Git Bash in the visible workspace chrome
+- Existing sidebar git/PR metadata remains visible and is now grouped with shell metadata in a single rendered line
+- Shell metadata still reflects configured launch intent rather than per-workspace runtime detection, so WSL/native divergence is still incomplete
+
+### 7. Sidebar runtime detection promoted beyond config inference
+
+Implemented and committed in:
+
+- `8f1b472a0` - `feat(win32): wire sidebar runtime metadata`
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` to derive sidebar shell type from each live surface's exec argv instead of only from global config
+- Switched sidebar git / PR refresh to use WSL-aware command routing when the live workspace shell resolves to WSL
+- Added a first real Windows TCP listener scan in `src/cmux/git/PortScanner.zig`
+- Wired sidebar port metadata refresh to the live workspace process handle and sidebar state refresh path
+- Refreshed runtime sidebar metadata on workspace creation, cwd updates, and tab selection so the visible chrome stays closer to live process state
+
+Current behavior:
+
+- Sidebar shell labels now reflect the live workspace launch argv rather than only configured launch intent
+- Sidebar git branch / PR refresh now follows WSL command routing when the workspace shell is detected as WSL
+- Sidebar can now surface a first live set of interesting listening ports tied to the active workspace process on Windows
+
+### 8. Sidebar port attribution extended to child process trees
+
+Implemented and committed in:
+
+- `48b930b9d` - `feat(win32): follow child process ports in sidebar`
+
+What landed in this slice:
+
+- Extended `src/cmux/git/PortScanner.zig` to snapshot the Windows process table and collect descendant PIDs for a workspace root process
+- Updated sidebar port refresh to attribute interesting listening ports across the workspace shell's child process tree instead of only the direct shell PID
+- Added an explicit Win32 `GetProcessId` declaration in `src/apprt/win32/win32.zig` so workspace process handles can be resolved cleanly for sidebar metadata
+
+Current behavior:
+
+- Sidebar ports now better track dev servers launched under the workspace shell rather than only ports owned by the shell process itself
+- Port attribution is still limited to Windows process-tree visibility and interesting TCP listeners; broader protocol/state attribution is still pending
+
+### 9. Sidebar polish and legacy-tab dependency reduced further
+
+Implemented and committed in:
+
+- `ed5379374` - `feat(win32): polish sidebar chrome`
+
+What landed in this slice:
+
+- Refined `src/cmux/ui/Sidebar.zig` GDI rendering with tighter text columns, active outlines, viewport clipping, and a more visible new-workspace affordance
+- Updated `src/apprt/win32/Window.zig` invalidation so sidebar mode repaints the sidebar child directly instead of routing through hidden top-tab assumptions
+- Reduced live message-loop dependence on legacy tab-bar hover state when the sidebar is active
+
+Current behavior:
+
+- Sidebar mode now behaves more like the primary workspace chrome and less like a mirror layered on top of a hidden tab bar
+- The interim GDI sidebar is still not full Direct2D/DirectWrite quality, but it is visually closer to a finished workspace chrome
+
+### 10. Sidebar Direct2D/DirectWrite renderer brought online
+
+Implemented and committed in:
+
+- `f1cfeeeac` - `feat(win32): add sidebar direct2d fallback path`
+
+What landed in this slice:
+
+- Added a first real Direct2D/DirectWrite render path in `src/cmux/ui/Sidebar.zig`
+- Kept the current GDI renderer as a fallback when Direct2D/DirectWrite resource creation fails
+- Wired sidebar resize handling to resize the Direct2D hwnd render target when available
+- Preserved the existing metadata, badge, active-state, and new-workspace visuals across the new renderer path
+
+Current behavior:
+
+- Sidebar rendering now prefers a native Direct2D/DirectWrite path instead of always using the interim GDI fallback
+- Existing sidebar behavior stays intact because the GDI renderer remains available as a fallback path
+- The sidebar is much closer to a finished native workspace chrome; remaining sidebar work is mostly minor edge cleanup rather than a missing renderer
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -159,14 +292,10 @@ image or cross-compilation environment.
 
 ### Sidebar / workspace UI
 
-- Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
-- Sidebar metadata is still minimal; it does not yet fully show:
-  - git branch
-  - PR status/number
-  - ports
+- Sidebar now has a Direct2D/DirectWrite render path with GDI fallback retained for resilience
+- Sidebar metadata rendering now has slots for shell type, git branch, PR number, and ports; runtime population is improved but still incomplete overall
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
-- Sidebar-driven rename, reorder, and context menus still need to become the primary path
-- Sidebar drag reorder is still not fully native through the sidebar itself
+- Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection/layout paths still assume the legacy top tab bar
 
 ### Notifications
 
@@ -187,7 +316,9 @@ image or cross-compilation environment.
 
 ### Shell / metadata / integration
 
-- WSL/native shell detection and git/port metadata are not yet live in the sidebar
+- Sidebar shell metadata now uses live exec argv classification for active workspaces, but deeper runtime/process-tree detection is still incomplete
+- Sidebar port metadata now includes child-process-tree attribution, but broader protocol/state attribution is still incomplete
+- WSL-aware sidebar git metadata refresh now exists, but it still depends on cwd updates and does not yet cover every runtime/source path
 - Shell integration scripts exist but are not yet fully connected end-to-end to sidebar state
 
 ### Remote / SSH / teams workflows
