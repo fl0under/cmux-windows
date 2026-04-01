@@ -10,6 +10,7 @@ const apprt = @import("../../apprt.zig");
 const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
+const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -35,6 +36,9 @@ active_tab: usize = 0,
 
 /// Whether the tab bar is visible (shown when >1 tab).
 tab_bar_visible: bool = false,
+
+/// Optional cmux vertical workspace sidebar.
+sidebar: ?Sidebar = null,
 
 /// DPI scale factor (DPI / 96.0).
 scale: f32 = 1.0,
@@ -106,6 +110,10 @@ pub fn init(self: *Window, app: *App, options: InitOptions) !void {
         .app = app,
         .is_quick_terminal = options.is_quick_terminal,
     };
+
+    if (!options.is_quick_terminal) {
+        self.sidebar = Sidebar.init(app.core_app.alloc);
+    }
 
     const style: u32 = if (options.is_quick_terminal) w32.WS_POPUP else w32.WS_OVERLAPPEDWINDOW;
     const ex_style: u32 = if (options.is_quick_terminal) w32.WS_EX_TOOLWINDOW else 0;
@@ -189,6 +197,13 @@ pub fn init(self: *Window, app: *App, options: InitOptions) !void {
     // surface which triggers ShowWindow on the parent as needed.
     // Showing the parent before the terminal is ready can cause
     // timing issues with ConPTY.
+
+    if (!options.is_quick_terminal) {
+        try Sidebar.registerClass(app.hinstance);
+        if (self.sidebar) |*sidebar| {
+            try sidebar.createWindow(hwnd, app.hinstance);
+        }
+    }
 }
 
 /// Deinitialize the Window: close all tabs, delete font, destroy HWND.
@@ -213,6 +228,7 @@ pub fn deinit(self: *Window) void {
 /// Returns the tab bar height in pixels, accounting for DPI scale.
 /// Returns 0 if the tab bar is not visible.
 pub fn tabBarHeight(self: *const Window) i32 {
+    if (self.sidebar != null) return 0;
     if (!self.tab_bar_visible) return 0;
     return @intFromFloat(@round(32.0 * self.scale));
 }
@@ -224,6 +240,9 @@ pub fn surfaceRect(self: *const Window) w32.RECT {
     var rect: w32.RECT = undefined;
     if (w32.GetClientRect(hwnd, &rect) == 0) {
         return .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+    }
+    if (self.sidebar) |sidebar| {
+        rect.left += sidebar.getWidth();
     }
     rect.top += self.tabBarHeight();
     return rect;
@@ -318,6 +337,21 @@ pub fn addTab(self: *Window) !*Surface {
     } else {
         self.selectTabIndex(pos);
     }
+
+    if (self.sidebar) |*sidebar| {
+        var title_buf: [64]u8 = undefined;
+        const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
+        if (pos >= sidebar.tabs.items.len) {
+            _ = sidebar.addTab(default_name) catch {};
+        } else {
+            _ = sidebar.addTab(default_name) catch {};
+            if (pos < sidebar.tabs.items.len - 1) {
+                sidebar.reorderTab(sidebar.tabs.items.len - 1, pos);
+            }
+        }
+        sidebar.setActiveTab(self.active_tab);
+    }
+
     self.updateTabBarVisibility();
     return surface;
 }
@@ -343,6 +377,11 @@ fn closeTabByIndex(self: *Window, idx: usize) void {
         self.tab_titles[i] = self.tab_titles[i + 1];
         self.tab_title_lens[i] = self.tab_title_lens[i + 1];
     }
+
+    if (self.sidebar) |*sidebar| {
+        sidebar.removeTab(idx);
+    }
+
     self.tab_count -= 1;
     if (self.tab_count == 0) {
         if (self.hwnd) |hwnd| _ = w32.PostMessageW(hwnd, w32.WM_CLOSE, 0, 0);
@@ -460,6 +499,9 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     self.layoutSplits();
     if (surface.hwnd) |h| _ = w32.SetFocus(h);
     self.updateWindowTitle();
+    if (self.sidebar) |*sidebar| {
+        sidebar.setActiveTab(idx);
+    }
 }
 
 /// Return the number of tabs ("workspaces" in cmux terms) in this window.
@@ -485,6 +527,9 @@ pub fn renameTabIndex(self: *Window, idx: usize, title: [:0]const u8) void {
     if (idx >= self.tab_count) return;
     const surface = self.tab_active_surface[idx];
     self.onTabTitleChanged(surface, title);
+    if (self.sidebar) |*sidebar| {
+        sidebar.renameTab(idx, std.mem.span(title));
+    }
 }
 
 /// Close a tab by index.
@@ -914,6 +959,10 @@ pub fn onTabTitleChanged(self: *Window, surface: *Surface, title: [:0]const u8) 
 
 /// Update tab bar visibility based on config and tab count.
 fn updateTabBarVisibility(self: *Window) void {
+    if (self.sidebar != null) {
+        self.tab_bar_visible = false;
+        return;
+    }
     if (self.is_quick_terminal) {
         self.tab_bar_visible = false;
         return;
@@ -932,6 +981,10 @@ fn updateTabBarVisibility(self: *Window) void {
 
 /// Invalidate the tab bar region so it gets repainted.
 pub fn invalidateTabBar(self: *Window) void {
+    if (self.sidebar) |*sidebar| {
+        sidebar.setActiveTab(self.active_tab);
+        return;
+    }
     const hwnd = self.hwnd orelse return;
     var rect = w32.RECT{
         .left = 0,
@@ -945,6 +998,7 @@ pub fn invalidateTabBar(self: *Window) void {
 /// Paint the tab bar using double-buffered GDI painting.
 /// Draws tab backgrounds, text labels, close buttons (x), and the new-tab (+) button.
 fn paintTabBar(self: *Window) void {
+    if (self.sidebar != null) return;
     const hwnd = self.hwnd orelse return;
 
     var ps: w32.PAINTSTRUCT = undefined;
@@ -1184,19 +1238,11 @@ pub fn toggleFullscreen(self: *Window) void {
         var mi: w32.MONITORINFO = undefined;
         mi.cbSize = @sizeOf(w32.MONITORINFO);
         if (w32.GetMonitorInfoW(monitor, &mi) != 0) {
-            _ = w32.SetWindowPos(hwnd, null,
-                mi.rcMonitor.left, mi.rcMonitor.top,
-                mi.rcMonitor.right - mi.rcMonitor.left,
-                mi.rcMonitor.bottom - mi.rcMonitor.top,
-                w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED);
+            _ = w32.SetWindowPos(hwnd, null, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED);
         }
     } else {
         _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, self.saved_style);
-        _ = w32.SetWindowPos(hwnd, null,
-            self.saved_rect.left, self.saved_rect.top,
-            self.saved_rect.right - self.saved_rect.left,
-            self.saved_rect.bottom - self.saved_rect.top,
-            w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED);
+        _ = w32.SetWindowPos(hwnd, null, self.saved_rect.left, self.saved_rect.top, self.saved_rect.right - self.saved_rect.left, self.saved_rect.bottom - self.saved_rect.top, w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED);
     }
     self.is_fullscreen = !self.is_fullscreen;
 }
@@ -1217,12 +1263,18 @@ pub fn toggleWindowDecorations(self: *Window) void {
         _ = w32.SetWindowLongW(hwnd, w32.GWL_STYLE, new_style);
     }
     // Force frame recalculation.
-    _ = w32.SetWindowPos(hwnd, null, 0, 0, 0, 0,
-        w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED | w32.SWP_NOMOVE | w32.SWP_NOSIZE);
+    _ = w32.SetWindowPos(hwnd, null, 0, 0, 0, 0, w32.SWP_NOZORDER | w32.SWP_FRAMECHANGED | w32.SWP_NOMOVE | w32.SWP_NOSIZE);
 }
 
 /// Handle WM_SIZE: re-layout the active tab's split panes and repaint tab bar.
 fn handleResize(self: *Window) void {
+    if (self.sidebar) |*sidebar| {
+        const hwnd = self.hwnd orelse return;
+        var rect: w32.RECT = undefined;
+        if (w32.GetClientRect(hwnd, &rect) != 0) {
+            sidebar.resize(rect.bottom - rect.top);
+        }
+    }
     self.layoutSplits();
     self.invalidateTabBar();
 }
@@ -1230,6 +1282,7 @@ fn handleResize(self: *Window) void {
 /// Handle a left-button click in the tab bar region.
 /// Dispatches to addTab, closeTab, or selectTabIndex depending on hit position.
 fn handleTabBarClick(self: *Window, x: i16, y: i16) void {
+    if (self.sidebar != null) return;
     if (!self.tab_bar_visible) return;
     if (y >= self.tabBarHeight()) return;
 
@@ -1304,12 +1357,17 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
     self.tab_title_lens[to] = saved_title_len;
 
     self.active_tab = to;
+    if (self.sidebar) |*sidebar| {
+        sidebar.reorderTab(from, to);
+        sidebar.setActiveTab(self.active_tab);
+    }
     self.invalidateTabBar();
 }
 
 /// Handle mouse movement over the tab bar for hover effects.
 /// Registers TrackMouseEvent on first move so we get WM_MOUSELEAVE.
 fn handleTabBarMouseMove(self: *Window, x: i16, y: i16) void {
+    if (self.sidebar != null) return;
     if (!self.tab_bar_visible) return;
 
     // Register for WM_MOUSELEAVE if not already tracking.
@@ -1365,6 +1423,7 @@ const TAB_CTX_NEW_TAB: usize = 9004;
 /// Handle a right-button click in the tab bar region.
 /// Shows a context menu for the clicked tab.
 fn handleTabBarRightClick(self: *Window, x: i16, y: i16) void {
+    if (self.sidebar != null) return;
     if (!self.tab_bar_visible) return;
     if (y >= self.tabBarHeight()) return;
 
@@ -1494,7 +1553,18 @@ pub fn startTabRename(self: *Window, tab_idx: usize) void {
     // Set font — stored for cleanup
     self.rename_font = w32.CreateFontW(
         -@as(i32, @intFromFloat(@round(12.0 * self.scale))),
-        0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
         std.unicode.utf8ToUtf16LeStringLiteral("Segoe UI"),
     );
     if (self.rename_font) |f| {
@@ -1526,7 +1596,10 @@ pub fn finishTabRename(self: *Window) void {
 
     _ = w32.DestroyWindow(edit);
     self.rename_edit = null;
-    if (self.rename_font) |f| { _ = w32.DeleteObject(f); self.rename_font = null; }
+    if (self.rename_font) |f| {
+        _ = w32.DeleteObject(f);
+        self.rename_font = null;
+    }
     self.invalidateTabBar();
 
     // Return focus to the active surface
@@ -1540,7 +1613,10 @@ pub fn cancelTabRename(self: *Window) void {
     if (self.rename_edit) |edit| {
         _ = w32.DestroyWindow(edit);
         self.rename_edit = null;
-        if (self.rename_font) |f| { _ = w32.DeleteObject(f); self.rename_font = null; }
+        if (self.rename_font) |f| {
+            _ = w32.DeleteObject(f);
+            self.rename_font = null;
+        }
         if (self.getActiveSurface()) |s| {
             if (s.hwnd) |h| _ = w32.SetFocus(h);
         }
@@ -1599,6 +1675,10 @@ fn onDestroy(self: *Window) void {
     }
 
     // Clean up Window-level resources.
+    if (self.sidebar) |*sidebar| {
+        sidebar.deinit();
+        self.sidebar = null;
+    }
     if (self.tab_font) |font| {
         _ = w32.DeleteObject(font);
         self.tab_font = null;
@@ -1660,6 +1740,14 @@ pub fn windowWndProc(
             window.paintTabBar();
             return 0;
         },
+        Sidebar.WM_CMUX_TAB_CLICKED => {
+            window.selectTabIndex(wparam);
+            return 0;
+        },
+        Sidebar.WM_CMUX_NEW_WORKSPACE => {
+            _ = window.addTab() catch {};
+            return 0;
+        },
         w32.WM_SETFOCUS => {
             // Forward keyboard focus to the active child surface.
             // Without this, keyboard input stays on the parent and
@@ -1677,7 +1765,7 @@ pub fn windowWndProc(
                 window.startDividerDrag(hit.handle, hit.layout);
                 return 0;
             }
-            if (y < window.tabBarHeight()) {
+            if (window.sidebar == null and y < window.tabBarHeight()) {
                 window.handleTabBarClick(@truncate(x), @truncate(y));
             }
             return 0;
@@ -1699,7 +1787,7 @@ pub fn windowWndProc(
             const x: i32 = @as(i16, @truncate(lparam & 0xFFFF));
             const y: i32 = @as(i16, @truncate((lparam >> 16) & 0xFFFF));
             // Double-click on tab bar starts inline rename
-            if (y < window.tabBarHeight()) {
+            if (window.sidebar == null and y < window.tabBarHeight()) {
                 for (0..window.tab_count) |i| {
                     const rect = window.tab_rects[i];
                     if (x >= rect.left and x < rect.right) {
@@ -1719,7 +1807,7 @@ pub fn windowWndProc(
         w32.WM_RBUTTONUP => {
             const x: i16 = @truncate(lparam & 0xFFFF);
             const y: i16 = @truncate((lparam >> 16) & 0xFFFF);
-            if (y < window.tabBarHeight()) {
+            if (window.sidebar == null and y < window.tabBarHeight()) {
                 window.handleTabBarRightClick(x, y);
                 return 0;
             }
@@ -1763,7 +1851,7 @@ pub fn windowWndProc(
                 }
                 return 0;
             }
-            if (y < window.tabBarHeight()) {
+            if (window.sidebar == null and y < window.tabBarHeight()) {
                 window.handleTabBarMouseMove(@truncate(x), @truncate(y));
             }
             return 0;
