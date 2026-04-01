@@ -258,9 +258,9 @@ Current behavior:
 
 ### 11. Notification history panel and store-backed unread state wired into Win32 runtime
 
-Implemented in the current working tree after:
+Implemented and committed in:
 
-- `f1cfeeeac` - `feat(win32): add sidebar direct2d fallback path`
+- `b81de096a` - `feat(win32): wire notification history panel`
 
 What landed in this slice:
 
@@ -281,13 +281,13 @@ Current behavior:
 
 ### Local tools added during port work
 
-- Installed local Zig toolchain at `/workspace/.tools/zig`
+- No persistent local tools currently installed in the workspace
 
 ### Current build blocker in this Linux environment
 
 Attempted:
 
-- `"/workspace/.tools/zig/zig" build -Dapp-runtime=win32 -Dtarget=x86_64-windows -Doptimize=Debug`
+- `zig-x86_64-linux-0.15.2/zig build -Dapp-runtime=win32 -Dtarget=x86_64-windows -Doptimize=Debug`
 
 Blocked by environment/toolchain gaps, not yet by a fully isolated cmux code error:
 
