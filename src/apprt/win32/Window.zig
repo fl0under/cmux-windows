@@ -12,11 +12,13 @@ const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
+const NotificationPanel = @import("../../cmux/ui/NotificationPanel.zig").NotificationPanel;
 const Theme = @import("../../cmux/ui/Theme.zig").Theme;
 const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
 const Workspace = @import("../../cmux/workspace/Workspace.zig").Workspace;
 const GitStatus = @import("../../cmux/git/GitStatus.zig").GitStatus;
 const PortScanner = @import("../../cmux/git/PortScanner.zig").PortScanner;
+const NotificationStore = @import("../../cmux/notifications/NotificationStore.zig").NotificationStore;
 const ProcessInfo = @import("../../pty.zig").ProcessInfo;
 const w32 = @import("win32.zig");
 
@@ -47,6 +49,9 @@ tab_bar_visible: bool = false,
 
 /// Optional cmux vertical workspace sidebar.
 sidebar: ?Sidebar = null,
+
+/// Popup notification history for the active workspace.
+notification_panel: ?NotificationPanel = null,
 
 /// Sidebar metadata mirrored from the live tab model.
 sidebar_tabs: [64]SidebarTab = undefined,
@@ -125,6 +130,7 @@ pub fn init(self: *Window, app: *App, options: InitOptions) !void {
 
     if (!options.is_quick_terminal) {
         self.sidebar = Sidebar.init(app.core_app.alloc);
+        self.notification_panel = NotificationPanel.init();
         for (0..self.sidebar_tabs.len) |i| {
             self.sidebar_tabs[i] = SidebarTab.init("");
         }
@@ -215,8 +221,15 @@ pub fn init(self: *Window, app: *App, options: InitOptions) !void {
 
     if (!options.is_quick_terminal) {
         try Sidebar.registerClass(app.hinstance);
+        try NotificationPanel.registerClass(app.hinstance);
         if (self.sidebar) |*sidebar| {
             try sidebar.createWindow(hwnd, app.hinstance);
+        }
+        if (self.notification_panel) |*panel| {
+            if (app.cmux) |*cmux| {
+                panel.setStore(&cmux.notifications);
+            }
+            try panel.createWindow(hwnd, app.hinstance, 0, 0);
         }
     }
 }
@@ -230,6 +243,11 @@ pub fn deinit(self: *Window) void {
     if (self.tab_font) |font| {
         _ = w32.DeleteObject(font);
         self.tab_font = null;
+    }
+
+    if (self.notification_panel) |*panel| {
+        panel.deinit();
+        self.notification_panel = null;
     }
 
     // Clear GWLP_USERDATA before destroying to prevent stale pointer access.
@@ -267,6 +285,11 @@ pub fn surfaceRect(self: *const Window) w32.RECT {
 pub fn getActiveSurface(self: *Window) ?*Surface {
     if (self.tab_count == 0) return null;
     return self.tab_active_surface[self.active_tab];
+}
+
+fn notificationStore(self: *Window) ?*NotificationStore {
+    if (self.app.cmux) |*cmux| return &cmux.notifications;
+    return null;
 }
 
 /// Find the tab index containing a given surface.
@@ -358,6 +381,7 @@ pub fn addTab(self: *Window) !*Surface {
         const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
         self.sidebar_tabs[pos] = SidebarTab.init(default_name);
         self.refreshSidebarRuntimeMetadata(pos);
+        self.syncSidebarNotificationState(pos);
         self.sidebar_tabs[pos].is_active = (pos == self.active_tab);
         if (pos >= sidebar.tabs.items.len) {
             _ = sidebar.addTab(default_name) catch {};
@@ -577,12 +601,14 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     self.updateWindowTitle();
     if (self.sidebar) |*sidebar| {
         self.refreshSidebarRuntimeMetadata(idx);
+        self.syncSidebarNotificationState(idx);
         for (0..self.tab_count) |i| {
             self.sidebar_tabs[i].is_active = (i == idx);
         }
         sidebar.setActiveTab(idx);
         sidebar.updateTab(idx, self.sidebar_tabs[idx]);
     }
+    self.repositionNotificationPanel();
 }
 
 /// Return the number of tabs ("workspaces" in cmux terms) in this window.
@@ -1046,9 +1072,14 @@ pub fn onTabTitleChanged(self: *Window, surface: *Surface, title: [:0]const u8) 
 
 pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) void {
     if (tab_idx >= self.tab_count) return;
-    self.sidebar_tabs[tab_idx].addNotification(text);
-    if (self.sidebar) |*sidebar| {
-        sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    _ = text;
+    self.syncSidebarNotificationState(tab_idx);
+
+    const workspace_id: u32 = @intCast(tab_idx + 1);
+    if (self.notification_panel) |*panel| {
+        if (panel.isShowingWorkspace(workspace_id)) {
+            panel.invalidate();
+        }
     }
 }
 
@@ -1107,9 +1138,90 @@ fn refreshSidebarGitMetadata(self: *Window, tab_idx: usize) void {
 
 pub fn markSidebarRead(self: *Window, tab_idx: usize) void {
     if (tab_idx >= self.tab_count) return;
-    self.sidebar_tabs[tab_idx].markRead();
+    if (self.notificationStore()) |store| {
+        store.markAllRead(@intCast(tab_idx + 1));
+    }
+    self.syncSidebarNotificationState(tab_idx);
+}
+
+fn syncSidebarNotificationState(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+
+    if (self.notificationStore()) |store| {
+        const workspace_id: u32 = @intCast(tab_idx + 1);
+        self.sidebar_tabs[tab_idx].unread_count = @intCast(@min(store.unreadCountForWorkspace(workspace_id), std.math.maxInt(u16)));
+        if (store.findLatestForWorkspace(workspace_id)) |idx| {
+            if (store.get(idx)) |entry| {
+                const body = entry.getBody();
+                const title = entry.getTitle();
+                if (body.len > 0) {
+                    self.sidebar_tabs[tab_idx].setLastNotification(body);
+                } else {
+                    self.sidebar_tabs[tab_idx].setLastNotification(title);
+                }
+            }
+        } else {
+            self.sidebar_tabs[tab_idx].setLastNotification("");
+        }
+    } else {
+        self.sidebar_tabs[tab_idx].markRead();
+        self.sidebar_tabs[tab_idx].setLastNotification("");
+    }
+
     if (self.sidebar) |*sidebar| {
         sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    }
+}
+
+pub fn syncAllSidebarNotificationState(self: *Window) void {
+    for (0..self.tab_count) |tab_idx| {
+        self.syncSidebarNotificationState(tab_idx);
+    }
+}
+
+fn notificationAnchorPoint(self: *Window) ?w32.POINT {
+    const hwnd = self.hwnd orelse return null;
+    var client_rect: w32.RECT = undefined;
+    if (w32.GetClientRect(hwnd, &client_rect) == 0) return null;
+
+    const width = Theme.scaled(NotificationPanel.PANEL_WIDTH, self.scale);
+    var pt = w32.POINT{
+        .x = @max(client_rect.right - width - Theme.scaled(12, self.scale), 0),
+        .y = Theme.scaled(12, self.scale),
+    };
+    if (w32.ClientToScreen(hwnd, &pt) == 0) return null;
+    return pt;
+}
+
+fn repositionNotificationPanel(self: *Window) void {
+    if (self.notification_panel) |*panel| {
+        if (!panel.visible) return;
+        const pt = self.notificationAnchorPoint() orelse return;
+        panel.reposition(pt.x, pt.y);
+    }
+}
+
+pub fn toggleNotificationPanel(self: *Window) void {
+    if (self.is_quick_terminal or self.tab_count == 0) return;
+    const pt = self.notificationAnchorPoint() orelse return;
+    const workspace_id: u32 = @intCast(self.active_tab + 1);
+
+    if (self.notification_panel) |*panel| {
+        panel.toggleForWorkspace(workspace_id, pt.x, pt.y);
+    }
+    self.markSidebarRead(self.active_tab);
+}
+
+pub fn refreshNotificationUiForTab(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    self.syncSidebarNotificationState(tab_idx);
+
+    if (self.notification_panel) |*panel| {
+        const workspace_id: u32 = @intCast(tab_idx + 1);
+        if (panel.isShowingWorkspace(workspace_id)) {
+            self.repositionNotificationPanel();
+            panel.invalidate();
+        }
     }
 }
 
@@ -1471,6 +1583,7 @@ fn handleResize(self: *Window) void {
             sidebar.resize(rect.bottom - rect.top);
         }
     }
+    self.repositionNotificationPanel();
     if (self.rename_sidebar_mode) {
         if (self.rename_edit) |edit| {
             const rect = self.sidebarRenameRect(self.rename_tab) orelse {
@@ -1919,6 +2032,10 @@ fn onDestroy(self: *Window) void {
             _ = w32.DeleteObject(font);
             self.tab_font = null;
         }
+        if (self.notification_panel) |*panel| {
+            panel.deinit();
+            self.notification_panel = null;
+        }
         self.hwnd = null;
         // QuickTerminal handles the rest of cleanup (freeing self, quit timer).
         if (app.quick_terminal) |qt| {
@@ -1939,6 +2056,10 @@ fn onDestroy(self: *Window) void {
     if (self.sidebar) |*sidebar| {
         sidebar.deinit();
         self.sidebar = null;
+    }
+    if (self.notification_panel) |*panel| {
+        panel.deinit();
+        self.notification_panel = null;
     }
     if (self.tab_font) |font| {
         _ = w32.DeleteObject(font);

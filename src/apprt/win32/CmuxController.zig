@@ -230,12 +230,6 @@ pub const CmuxController = struct {
                 try allocator.dupe(u8, "");
             defer allocator.free(body);
 
-            const workspace_id: u32 = if (activeWindow(app)) |window|
-                @intCast(window.activeTabIndex() + 1)
-            else
-                0;
-            _ = self.notifications.add(workspace_id, title, body);
-
             const title_z = try allocator.dupeZ(u8, title);
             defer allocator.free(title_z);
             const body_z = try allocator.dupeZ(u8, body);

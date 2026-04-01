@@ -6,7 +6,7 @@ passes can resume quickly and keep the summary up to date.
 ## Last updated
 
 - Date: 2026-04-01
-- Branch: `cursor/cmux-sidebar-features-a87b`
+- Branch: `cursor/notifications-feature-parity-82c4`
 
 ## Upstream reference
 
@@ -256,17 +256,38 @@ Current behavior:
 - Existing sidebar behavior stays intact because the GDI renderer remains available as a fallback path
 - The sidebar is much closer to a finished native workspace chrome; remaining sidebar work is mostly minor edge cleanup rather than a missing renderer
 
+### 11. Notification history panel and store-backed unread state wired into Win32 runtime
+
+Implemented and committed in:
+
+- `b81de096a` - `feat(win32): wire notification history panel`
+
+What landed in this slice:
+
+- Expanded `src/cmux/ui/NotificationPanel.zig` from a paint stub into a real Win32 popup window backed by `NotificationStore`
+- Wired `src/apprt/win32/Window.zig` to own and position the notification panel per window, scoped to the active workspace
+- Switched sidebar unread/snippet refresh to derive from the shared `NotificationStore` so the sidebar, panel, and control-plane status share one notification source of truth
+- Added workspace-scoped notification panel toggling from the live runtime via `Ctrl+I`
+- Fixed `src/cmux/notifications/NotificationStore.zig` unread-count drift when the ring buffer overwrites unread entries
+- Removed duplicate notification-store writes from the Win32 cmux IPC `notify` path so notifications are not double-recorded
+
+Current behavior:
+
+- Live desktop notifications now populate a per-workspace notification history panel in the Win32 runtime
+- Opening the notification panel marks the active workspace as read and keeps sidebar unread badges synchronized with the shared store
+- Notification history is materially closer to cmux parity, but the animated per-surface notification ring is still not integrated
+
 ## Verified environment notes
 
 ### Local tools added during port work
 
-- Installed local Zig toolchain at `/workspace/.tools/zig`
+- No persistent local tools currently installed in the workspace
 
 ### Current build blocker in this Linux environment
 
 Attempted:
 
-- `"/workspace/.tools/zig/zig" build -Dapp-runtime=win32 -Dtarget=x86_64-windows -Doptimize=Debug`
+- `zig-x86_64-linux-0.15.2/zig build -Dapp-runtime=win32 -Dtarget=x86_64-windows -Doptimize=Debug`
 
 Blocked by environment/toolchain gaps, not yet by a fully isolated cmux code error:
 
@@ -300,9 +321,11 @@ image or cross-compilation environment.
 ### Notifications
 
 - Notification store is wired into the control plane
-- Full notification ring and notification panel integration is still pending
+- Notification history panel is now integrated into the live Win32 window and backed by the shared store
+- Animated per-surface notification ring integration is still pending
 - Desktop notifications still use the existing Win32 notification path
-- Sidebar notification state has an initial plumbing path, but it is not yet complete for all runtime notification sources
+- Sidebar unread/snippet state now refreshes from the shared notification store for Win32 desktop-notification paths
+- Some notification-trigger paths still rely on Win32-local wiring and are not yet unified across every future source
 
 ### Browser
 
@@ -336,7 +359,7 @@ image or cross-compilation environment.
    - git branch
    - ports
 3. Clean up remaining top-tab event paths in `Window.zig`
-4. Integrate notification ring/panel into the live window/surface runtime
+4. Integrate the animated notification ring into live surface painting/timer paths
 5. Bring up the browser host as a real split leaf
 
 ## Maintenance rule for future agent passes
