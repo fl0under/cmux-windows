@@ -201,7 +201,24 @@ Current behavior:
 
 - Sidebar shell labels now reflect the live workspace launch argv rather than only configured launch intent
 - Sidebar git branch / PR refresh now follows WSL command routing when the workspace shell is detected as WSL
-- Sidebar can now surface a first live set of interesting listening ports tied to the active workspace process on Windows, though process-tree and child-server ownership are still incomplete
+- Sidebar can now surface a first live set of interesting listening ports tied to the active workspace process on Windows
+
+### 8. Sidebar port attribution extended to child process trees
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - child-process-tree port attribution for sidebar workspaces
+
+What landed in this slice:
+
+- Extended `src/cmux/git/PortScanner.zig` to snapshot the Windows process table and collect descendant PIDs for a workspace root process
+- Updated sidebar port refresh to attribute interesting listening ports across the workspace shell's child process tree instead of only the direct shell PID
+- Added an explicit Win32 `GetProcessId` declaration in `src/apprt/win32/win32.zig` so workspace process handles can be resolved cleanly for sidebar metadata
+
+Current behavior:
+
+- Sidebar ports now better track dev servers launched under the workspace shell rather than only ports owned by the shell process itself
+- Port attribution is still limited to Windows process-tree visibility and interesting TCP listeners; broader protocol/state attribution is still pending
 
 ## Verified environment notes
 

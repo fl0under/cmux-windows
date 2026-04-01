@@ -426,7 +426,7 @@ fn refreshSidebarPortMetadata(self: *Window, tab_idx: usize, surface: *const Sur
     };
 
     var port_scanner = PortScanner.init(self.app.core_app.alloc);
-    const ports = port_scanner.scanInterestingPortsForPid(port_owner_pid) catch return;
+    const ports = port_scanner.scanInterestingPortsForPidTree(port_owner_pid) catch return;
     defer self.app.core_app.alloc.free(ports);
     for (ports) |port| self.sidebar_tabs[tab_idx].addPort(port);
 }
