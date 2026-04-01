@@ -12,6 +12,7 @@ const CoreSurface = @import("../../Surface.zig");
 const internal_os = @import("../../os/main.zig");
 
 const QuickTerminal = @import("QuickTerminal.zig");
+const CmuxController = @import("CmuxController.zig").CmuxController;
 const Surface = @import("Surface.zig");
 const Window = @import("Window.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
@@ -82,6 +83,9 @@ quick_terminal: ?*QuickTerminal = null,
 
 /// Whether a global hotkey has been registered.
 global_hotkey_registered: bool = false,
+
+/// cmux control-plane services layered onto the Win32 runtime.
+cmux: ?CmuxController = null,
 
 pub fn init(
     self: *App,
@@ -211,6 +215,13 @@ pub fn init(
     // Register global hotkey for quick terminal (if configured).
     self.registerGlobalHotkey();
 
+    // Start cmux control services on the message-only HWND so external
+    // automation can safely marshal commands onto the main thread.
+    var cmux = CmuxController.init(alloc);
+    errdefer cmux.deinit();
+    try cmux.start(self.msg_hwnd.?);
+    self.cmux = cmux;
+
     // Check for updates in the background (non-blocking).
     self.startUpdateCheck();
 }
@@ -303,6 +314,11 @@ pub fn terminate(self: *App) void {
     if (self.quick_terminal) |qt| {
         qt.deinit();
         self.quick_terminal = null;
+    }
+
+    if (self.cmux) |*cmux| {
+        cmux.deinit();
+        self.cmux = null;
     }
 
     if (self.msg_hwnd) |hwnd| {
@@ -583,6 +599,9 @@ pub fn performAction(
         },
 
         .desktop_notification => {
+            if (self.cmux) |*cmux| {
+                cmux.recordDesktopNotification(target, value);
+            }
             self.showDesktopNotification(target, value);
             return true;
         },
@@ -1584,6 +1603,14 @@ fn msgWndProc(
     if (msg == WM_APP_UPDATE_AVAILABLE) {
         app.showUpdateNotification();
         return 0;
+    }
+
+    if (msg == CmuxController.ipcMessage()) {
+        if (app.cmux) |*cmux| {
+            const pending: *CmuxController.PendingRequest = @ptrFromInt(@as(usize, @bitCast(lparam)));
+            cmux.handlePendingRequest(app, pending);
+            return 0;
+        }
     }
 
     if (msg == w32.WM_TIMER and wparam == QUIT_TIMER_ID) {

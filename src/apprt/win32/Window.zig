@@ -462,6 +462,55 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     self.updateWindowTitle();
 }
 
+/// Return the number of tabs ("workspaces" in cmux terms) in this window.
+pub fn tabCount(self: *const Window) usize {
+    return self.tab_count;
+}
+
+/// Return the currently active tab index.
+pub fn activeTabIndex(self: *const Window) usize {
+    return self.active_tab;
+}
+
+/// Return the title of the given tab as UTF-8 in the provided buffer.
+pub fn getTabTitleUtf8(self: *const Window, idx: usize, buf: []u8) []const u8 {
+    if (idx >= self.tab_count or buf.len == 0) return "";
+    const len = self.tab_title_lens[idx];
+    const written = std.unicode.utf16LeToUtf8(buf, self.tab_titles[idx][0..len]) catch 0;
+    return buf[0..written];
+}
+
+/// Rename a tab by index.
+pub fn renameTabIndex(self: *Window, idx: usize, title: [:0]const u8) void {
+    if (idx >= self.tab_count) return;
+    const surface = self.tab_active_surface[idx];
+    self.onTabTitleChanged(surface, title);
+}
+
+/// Close a tab by index.
+pub fn closeTabIndex(self: *Window, idx: usize) void {
+    self.closeTabByIndex(idx);
+}
+
+/// Close the currently active split/pane in the active tab.
+pub fn closeActivePane(self: *Window) void {
+    if (self.tab_count == 0) return;
+    self.closeSplitSurface(self.tab_active_surface[self.active_tab]);
+}
+
+/// Return the active surface for a specific tab index.
+pub fn getTabActiveSurface(self: *Window, idx: usize) ?*Surface {
+    if (idx >= self.tab_count) return null;
+    return self.tab_active_surface[idx];
+}
+
+/// Bring the top-level window to the foreground if possible.
+pub fn focusWindow(self: *Window) void {
+    if (self.hwnd) |hwnd| {
+        _ = w32.SetForegroundWindow(hwnd);
+    }
+}
+
 /// Layout split panes for the active tab.
 pub fn layoutSplits(self: *Window) void {
     if (self.tab_count == 0) return;
