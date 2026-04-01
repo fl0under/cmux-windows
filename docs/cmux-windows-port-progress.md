@@ -185,9 +185,9 @@ Current behavior:
 
 ### 7. Sidebar runtime detection promoted beyond config inference
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - runtime shell detection, WSL-aware git refresh, and first live ports
+- `8f1b472a0` - `feat(win32): wire sidebar runtime metadata`
 
 What landed in this slice:
 
