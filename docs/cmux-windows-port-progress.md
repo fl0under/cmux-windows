@@ -167,9 +167,9 @@ Current behavior:
 
 ### 6. Sidebar shell metadata surfaced in live workspace chrome
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - shell-type metadata surfaced in sidebar entries
+- `45edaab65` - `feat(win32): surface sidebar shell metadata`
 
 What landed in this slice:
 
