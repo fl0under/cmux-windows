@@ -69,6 +69,39 @@ Current behavior:
 - Sidebar entries mirror the current tab/workspace list at a basic level
 - The existing Ghostty tab/split runtime still powers the actual terminal model underneath
 
+### 3. Sidebar metadata and native sidebar interactions
+
+Implemented and committed in progress on this branch:
+
+- `ba6008c60` - `feat(win32): surface sidebar metadata in workspace chrome`
+
+What landed after that slice:
+
+- Added persistent port tracking in `docs/cmux-windows-port-progress.md`
+- Added repo guidance in `CLAUDE.md` to keep the progress file current
+- Wired live Win32 `pwd` actions into sidebar workspace metadata
+- Wired desktop notifications into sidebar unread/snippet state
+- Sidebar now renders:
+  - workspace title
+  - latest notification snippet
+  - cwd fallback when no notification snippet exists
+  - unread badge
+- Sidebar now emits native interaction messages for:
+  - workspace click
+  - new workspace
+  - double-click rename
+  - right-click context actions
+- Window shell now handles sidebar-driven:
+  - rename
+  - close workspace
+  - context menu actions
+
+Current behavior:
+
+- Sidebar is now the main visible workspace chrome for selection and basic management
+- Live title/cwd/notification changes are reflected into sidebar entries
+- Some advanced interactions still route through the legacy tab model under the hood
+
 ### 3. Sidebar state and maintenance tracking tightened
 
 Implemented in the current working tree after:
@@ -130,11 +163,10 @@ image or cross-compilation environment.
 - Sidebar metadata is still minimal; it does not yet fully show:
   - git branch
   - PR status/number
-  - cwd
   - ports
-  - latest notification text
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
 - Sidebar-driven rename, reorder, and context menus still need to become the primary path
+- Sidebar drag reorder is still not fully native through the sidebar itself
 
 ### Notifications
 

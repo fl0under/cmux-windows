@@ -18,6 +18,7 @@ const log = std.log.scoped(.win32);
 
 /// Maximum number of tabs per window.
 const MAX_TABS: usize = 64;
+const SIDEBAR_CTX_CLOSE: usize = 9101;
 
 /// The parent App.
 app: *App,
@@ -985,6 +986,59 @@ pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) v
     }
 }
 
+pub fn setSidebarCwd(self: *Window, tab_idx: usize, cwd: []const u8) void {
+    if (tab_idx >= self.tab_count) return;
+    self.sidebar_tabs[tab_idx].setCwd(cwd);
+    if (self.sidebar) |*sidebar| {
+        sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    }
+}
+
+pub fn markSidebarRead(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    self.sidebar_tabs[tab_idx].markRead();
+    if (self.sidebar) |*sidebar| {
+        sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    }
+}
+
+fn handleSidebarRightClick(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    const menu = w32.CreatePopupMenu() orelse return;
+    defer _ = w32.DestroyMenu(menu);
+
+    _ = w32.AppendMenuW(
+        menu,
+        w32.MF_STRING,
+        Sidebar.WM_CMUX_TAB_RENAME,
+        std.unicode.utf8ToUtf16LeStringLiteral("Rename Workspace"),
+    );
+    _ = w32.AppendMenuW(
+        menu,
+        if (self.tab_count > 1) w32.MF_STRING else w32.MF_GRAYED,
+        SIDEBAR_CTX_CLOSE,
+        std.unicode.utf8ToUtf16LeStringLiteral("Close Workspace"),
+    );
+
+    var pt: w32.POINT = undefined;
+    if (w32.GetCursorPos_(&pt) == 0) return;
+
+    const cmd = w32.TrackPopupMenuEx(
+        menu,
+        w32.TPM_LEFTALIGN | w32.TPM_TOPALIGN | w32.TPM_RETURNCMD,
+        pt.x,
+        pt.y,
+        self.hwnd.?,
+        null,
+    );
+
+    switch (@as(usize, @intCast(cmd))) {
+        Sidebar.WM_CMUX_TAB_RENAME => self.startTabRename(tab_idx),
+        SIDEBAR_CTX_CLOSE => self.closeTabByIndex(tab_idx),
+        else => {},
+    }
+}
+
 /// Update tab bar visibility based on config and tab count.
 fn updateTabBarVisibility(self: *Window) void {
     if (self.sidebar != null) {
@@ -1770,10 +1824,25 @@ pub fn windowWndProc(
         },
         Sidebar.WM_CMUX_TAB_CLICKED => {
             window.selectTabIndex(wparam);
+            window.markSidebarRead(wparam);
             return 0;
         },
         Sidebar.WM_CMUX_NEW_WORKSPACE => {
             _ = window.addTab() catch {};
+            return 0;
+        },
+        Sidebar.WM_CMUX_TAB_RENAME => {
+            window.startTabRename(wparam);
+            return 0;
+        },
+        Sidebar.WM_CMUX_TAB_CLOSE => {
+            window.closeTabByIndex(wparam);
+            return 0;
+        },
+        Sidebar.WM_CMUX_TAB_REORDER => {
+            const from: usize = @intCast((wparam >> 16) & 0xFFFF);
+            const to: usize = @intCast(wparam & 0xFFFF);
+            window.moveTabTo(from, to);
             return 0;
         },
         w32.WM_SETFOCUS => {

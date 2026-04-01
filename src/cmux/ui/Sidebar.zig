@@ -40,6 +40,7 @@ pub const Sidebar = struct {
     pub const WM_CMUX_NEW_WORKSPACE = w32.WM_USER + 102;
     pub const WM_CMUX_TAB_REORDER = w32.WM_USER + 103;
     pub const WM_CMUX_TAB_RENAME = w32.WM_USER + 104;
+    pub const WM_CMUX_TAB_CONTEXT = w32.WM_USER + 105;
 
     pub fn init(allocator: Allocator) Sidebar {
         return .{
@@ -390,6 +391,13 @@ pub const Sidebar = struct {
         return y >= btn_y and y < btn_y + tab_h - padding;
     }
 
+    fn getPoint(lparam: isize) struct { x: i32, y: i32 } {
+        return .{
+            .x = @as(i16, @truncate(lparam & 0xFFFF)),
+            .y = @as(i16, @truncate((lparam >> 16) & 0xFFFF)),
+        };
+    }
+
     /// Window procedure for the sidebar HWND.
     fn sidebarWndProc(hwnd: w32.HWND, msg: u32, wparam: usize, lparam: isize) callconv(.C) isize {
         const self = getSidebarPtr(hwnd);
@@ -404,7 +412,8 @@ pub const Sidebar = struct {
                 return 0;
             },
             w32.WM_LBUTTONDOWN => {
-                const y: i32 = @as(i16, @truncate(@as(u32, @bitCast(@as(i32, @truncate(lparam >> 16))))));
+                const pt = getPoint(lparam);
+                const y = pt.y;
                 if (sidebar.hitTestTab(y)) |tab_index| {
                     sidebar.setActiveTab(tab_index);
                     // Notify parent
@@ -418,8 +427,29 @@ pub const Sidebar = struct {
                 }
                 return 0;
             },
+            w32.WM_LBUTTONDBLCLK => {
+                const pt = getPoint(lparam);
+                if (sidebar.hitTestTab(pt.y)) |tab_index| {
+                    if (sidebar.parent_hwnd) |parent| {
+                        _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_TAB_RENAME, tab_index, 0);
+                    }
+                }
+                return 0;
+            },
+            w32.WM_RBUTTONUP => {
+                const pt = getPoint(lparam);
+                if (sidebar.hitTestTab(pt.y)) |tab_index| {
+                    if (sidebar.parent_hwnd) |parent| {
+                        const context_payload: usize = (@as(usize, @intCast(@as(u16, @bitCast(pt.x)))) << 16) |
+                            @as(usize, @intCast(tab_index));
+                        _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_TAB_CONTEXT, context_payload, @as(isize, pt.y));
+                    }
+                    return 0;
+                }
+                return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
+            },
             w32.WM_MOUSEMOVE => {
-                const y: i32 = @as(i16, @truncate(@as(u32, @bitCast(@as(i32, @truncate(lparam >> 16))))));
+                const y = getPoint(lparam).y;
                 const new_hover = sidebar.hitTestTab(y);
                 if (new_hover != sidebar.hovered_tab) {
                     sidebar.hovered_tab = new_hover;
