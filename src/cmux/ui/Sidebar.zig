@@ -2,9 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const w32 = @import("../../apprt/win32/win32.zig");
 const Theme = @import("Theme.zig").Theme;
-const Color = @import("Theme.zig").Color;
 const SidebarTab = @import("SidebarTab.zig");
-const WorkspaceManager = @import("../workspace/WorkspaceManager.zig");
 
 /// The vertical sidebar for cmux-windows. Renders as a child HWND on the left
 /// edge of the main window using Direct2D. Displays workspace tabs with
@@ -42,6 +40,7 @@ pub const Sidebar = struct {
     pub const WM_CMUX_NEW_WORKSPACE = w32.WM_USER + 102;
     pub const WM_CMUX_TAB_REORDER = w32.WM_USER + 103;
     pub const WM_CMUX_TAB_RENAME = w32.WM_USER + 104;
+    pub const WM_CMUX_TAB_CONTEXT = w32.WM_USER + 105;
 
     pub fn init(allocator: Allocator) Sidebar {
         return .{
@@ -93,6 +92,8 @@ pub const Sidebar = struct {
         if (self.hwnd == null) {
             return error.CreateWindowFailed;
         }
+
+        _ = w32.SetWindowLongPtrW(self.hwnd.?, w32.GWLP_USERDATA, @bitCast(@intFromPtr(self)));
     }
 
     /// Register the sidebar window class.
@@ -162,6 +163,31 @@ pub const Sidebar = struct {
         if (self.active_tab >= self.tabs.items.len and self.tabs.items.len > 0) {
             self.active_tab = self.tabs.items.len - 1;
         }
+        self.invalidate();
+    }
+
+    /// Rename an existing tab without replacing its metadata.
+    pub fn renameTab(self: *Sidebar, index: usize, name: []const u8) void {
+        if (index >= self.tabs.items.len) return;
+        self.tabs.items[index].setName(name);
+        self.invalidate();
+    }
+
+    /// Reorder a tab to a new index.
+    pub fn reorderTab(self: *Sidebar, from: usize, to: usize) void {
+        if (from >= self.tabs.items.len or to >= self.tabs.items.len or from == to) return;
+
+        const tab = self.tabs.orderedRemove(from);
+        self.tabs.insert(to, tab) catch return;
+
+        if (self.active_tab == from) {
+            self.active_tab = to;
+        } else if (from < self.active_tab and to >= self.active_tab) {
+            self.active_tab -= 1;
+        } else if (from > self.active_tab and to <= self.active_tab) {
+            self.active_tab += 1;
+        }
+
         self.invalidate();
     }
 
@@ -269,8 +295,42 @@ pub const Sidebar = struct {
             _ = w32.SetTextColor(hdc, self.theme.sidebar_text.toColorRef());
             tab_rect.left += padding;
             tab_rect.top += padding;
-            _ = tab;
-            // TODO: DrawTextW with tab.name once we handle UTF-16 conversion
+            const title = tab.getName();
+            if (title.len > 0) {
+                var title_buf: [128]u16 = undefined;
+                const title_len = std.unicode.utf8ToUtf16Le(&title_buf, title) catch 0;
+                if (title_len > 0) {
+                    _ = w32.DrawTextW(
+                        hdc,
+                        @ptrCast(&title_buf),
+                        @intCast(title_len),
+                        &tab_rect,
+                        w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+                    );
+                }
+            }
+
+            // Latest notification snippet / cwd fallback
+            const detail = if (tab.last_notification_len > 0)
+                tab.last_notification[0..tab.last_notification_len]
+            else
+                tab.getCwd();
+            if (detail.len > 0) {
+                var detail_rect = tab_rect;
+                detail_rect.top += Theme.scaled(18, self.scale);
+                _ = w32.SetTextColor(hdc, self.theme.sidebar_text_dim.toColorRef());
+                var detail_buf: [256]u16 = undefined;
+                const detail_len = std.unicode.utf8ToUtf16Le(&detail_buf, detail) catch 0;
+                if (detail_len > 0) {
+                    _ = w32.DrawTextW(
+                        hdc,
+                        @ptrCast(&detail_buf),
+                        @intCast(detail_len),
+                        &detail_rect,
+                        w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+                    );
+                }
+            }
 
             // Notification badge
             if (tab.unread_count > 0) {
@@ -300,8 +360,14 @@ pub const Sidebar = struct {
             .bottom = btn_y + tab_h - padding,
         };
         _ = w32.SetTextColor(hdc, self.theme.accent.toColorRef());
-        _ = btn_rect;
-        // TODO: DrawTextW "+ New Workspace"
+        const new_workspace = std.unicode.utf8ToUtf16LeStringLiteral("+ New Workspace");
+        _ = w32.DrawTextW(
+            hdc,
+            new_workspace,
+            @intCast(new_workspace.len),
+            &btn_rect,
+            w32.DT_LEFT | w32.DT_VCENTER | w32.DT_SINGLELINE | w32.DT_NOPREFIX,
+        );
     }
 
     /// Hit-test to determine which tab (if any) was clicked.
@@ -315,6 +381,21 @@ pub const Sidebar = struct {
         const index = @as(usize, @intCast(@divTrunc(adjusted_y, tab_h)));
         if (index < self.tabs.items.len) return index;
         return null;
+    }
+
+    fn hitTestNewWorkspace(self: *Sidebar, y: i32) bool {
+        const tab_h = Theme.scaled(Theme.sidebar_tab_height, self.scale);
+        const header_height = Theme.scaled(40, self.scale);
+        const padding = Theme.scaled(Theme.sidebar_tab_padding, self.scale);
+        const btn_y = header_height + @as(i32, @intCast(self.tabs.items.len)) * tab_h + self.scroll_offset + padding;
+        return y >= btn_y and y < btn_y + tab_h - padding;
+    }
+
+    fn getPoint(lparam: isize) struct { x: i32, y: i32 } {
+        return .{
+            .x = @as(i16, @truncate(lparam & 0xFFFF)),
+            .y = @as(i16, @truncate((lparam >> 16) & 0xFFFF)),
+        };
     }
 
     /// Window procedure for the sidebar HWND.
@@ -331,18 +412,44 @@ pub const Sidebar = struct {
                 return 0;
             },
             w32.WM_LBUTTONDOWN => {
-                const y: i32 = @as(i16, @truncate(@as(u32, @bitCast(@as(i32, @truncate(lparam >> 16))))));
+                const pt = getPoint(lparam);
+                const y = pt.y;
                 if (sidebar.hitTestTab(y)) |tab_index| {
                     sidebar.setActiveTab(tab_index);
                     // Notify parent
                     if (sidebar.parent_hwnd) |parent| {
                         _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_TAB_CLICKED, tab_index, 0);
                     }
+                } else if (sidebar.hitTestNewWorkspace(y)) {
+                    if (sidebar.parent_hwnd) |parent| {
+                        _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_NEW_WORKSPACE, 0, 0);
+                    }
                 }
                 return 0;
             },
+            w32.WM_LBUTTONDBLCLK => {
+                const pt = getPoint(lparam);
+                if (sidebar.hitTestTab(pt.y)) |tab_index| {
+                    if (sidebar.parent_hwnd) |parent| {
+                        _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_TAB_RENAME, tab_index, 0);
+                    }
+                }
+                return 0;
+            },
+            w32.WM_RBUTTONUP => {
+                const pt = getPoint(lparam);
+                if (sidebar.hitTestTab(pt.y)) |tab_index| {
+                    if (sidebar.parent_hwnd) |parent| {
+                        const context_payload: usize = (@as(usize, @intCast(@as(u16, @bitCast(pt.x)))) << 16) |
+                            @as(usize, @intCast(tab_index));
+                        _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_TAB_CONTEXT, context_payload, @as(isize, pt.y));
+                    }
+                    return 0;
+                }
+                return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
+            },
             w32.WM_MOUSEMOVE => {
-                const y: i32 = @as(i16, @truncate(@as(u32, @bitCast(@as(i32, @truncate(lparam >> 16))))));
+                const y = getPoint(lparam).y;
                 const new_hover = sidebar.hitTestTab(y);
                 if (new_hover != sidebar.hovered_tab) {
                     sidebar.hovered_tab = new_hover;

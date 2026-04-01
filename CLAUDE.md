@@ -50,3 +50,9 @@ WSL is not special — ConPTY bridges the Win32 pseudo-console to the Linux PTY 
 - WebView2 for embedded browser (pre-installed on Windows 10/11)
 - Named Pipes for IPC (`\\.\pipe\cmux`)
 - JSON-RPC protocol for CLI ↔ app communication
+
+### Port Progress Tracking
+
+- Keep `docs/cmux-windows-port-progress.md` up to date whenever you make meaningful port progress.
+- Update it in the same change set as the code whenever feasible.
+- Add new completed slices with commit hashes, refresh remaining gaps, and keep environment/build blockers current.

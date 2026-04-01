@@ -154,6 +154,24 @@ pub fn build(b: *std.Build) !void {
     // Helpgen
     if (config.emit_helpgen) deps.help_strings.install();
 
+    // cmux control CLI for the Win32 runtime.
+    if (config.target.result.os.tag == .windows) {
+        const cmux_cli = b.addExecutable(.{
+            .name = "cmux",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("cli/main.zig"),
+                .target = config.target,
+                .optimize = config.optimize,
+                .strip = config.strip,
+                .omit_frame_pointer = config.strip,
+                .unwind_tables = if (config.strip) .none else .sync,
+            }),
+            .use_llvm = true,
+        });
+        const cmux_cli_install = b.addInstallArtifact(cmux_cli, .{});
+        b.getInstallStep().dependOn(&cmux_cli_install.step);
+    }
+
     // Runtime "none" is libghostty, anything else is an executable.
     if (config.app_runtime != .none) {
         if (config.emit_exe) {

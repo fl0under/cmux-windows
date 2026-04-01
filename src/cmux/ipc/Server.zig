@@ -2,7 +2,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const w32 = @import("../../apprt/win32/win32.zig");
 const Protocol = @import("Protocol.zig").Protocol;
-const Commands = @import("Commands.zig");
 
 /// Named pipe server running in the main cmux-windows process.
 /// Listens on \\.\pipe\cmux for incoming JSON-RPC requests from the CLI.
@@ -15,8 +14,6 @@ pub const Server = struct {
     running: bool = false,
     thread: ?std.Thread = null,
     app_hwnd: ?w32.HWND = null,
-    command_handler: ?*Commands = null,
-
     pub const PIPE_NAME = "\\\\.\\pipe\\cmux";
     pub const BUFFER_SIZE: u32 = 4096;
 
@@ -51,6 +48,53 @@ pub const Server = struct {
             self.thread = null;
         }
     }
+
+    pub const PendingRequest = struct {
+        allocator: Allocator,
+        request: []u8,
+        response: ?[]u8 = null,
+        completed: bool = false,
+        mutex: std.Thread.Mutex = .{},
+        cond: std.Thread.Condition = .{},
+
+        pub fn init(allocator: Allocator, request: []const u8) !*PendingRequest {
+            const pending = try allocator.create(PendingRequest);
+            errdefer allocator.destroy(pending);
+
+            pending.* = .{
+                .allocator = allocator,
+                .request = try allocator.dupe(u8, request),
+            };
+            return pending;
+        }
+
+        pub fn deinit(self: *PendingRequest) void {
+            self.allocator.free(self.request);
+            if (self.response) |response| self.allocator.free(response);
+            self.allocator.destroy(self);
+        }
+
+        pub fn completeOwned(self: *PendingRequest, response: []u8) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.response = response;
+            self.completed = true;
+            self.cond.signal();
+        }
+
+        pub fn wait(self: *PendingRequest) ?[]u8 {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            while (!self.completed) {
+                self.cond.wait(&self.mutex);
+            }
+
+            const response = self.response;
+            self.response = null;
+            return response;
+        }
+    };
 
     fn serverThread(self: *Server) void {
         while (self.running) {
@@ -100,22 +144,28 @@ pub const Server = struct {
         const read_ok = ReadFile(pipe, &buf, BUFFER_SIZE, &bytes_read, null);
         if (read_ok == 0 or bytes_read == 0) return;
 
-        const data = buf[0..bytes_read];
+        const pending = try PendingRequest.init(self.allocator, buf[0..bytes_read]);
+        defer pending.deinit();
 
-        // Process request
-        var response_buf: [BUFFER_SIZE]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&response_buf);
-
-        if (self.command_handler) |handler| {
-            handler.handleRequest(data, fbs.writer()) catch {
-                Protocol.writeError(fbs.writer(), null, -1, "internal error") catch {};
-            };
-        } else {
-            Protocol.writeError(fbs.writer(), null, -1, "no command handler") catch {};
+        const hwnd = self.app_hwnd orelse return error.NoAppWindow;
+        if (w32.PostMessageW(
+            hwnd,
+            WM_CMUX_IPC,
+            0,
+            @as(isize, @bitCast(@intFromPtr(pending))),
+        ) == 0) {
+            return error.DispatchFailed;
         }
 
+        const response = pending.wait() orelse blk: {
+            var response_buf: [128]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&response_buf);
+            Protocol.writeError(fbs.writer(), null, -1, "no response") catch {};
+            break :blk try self.allocator.dupe(u8, fbs.getWritten());
+        };
+        defer self.allocator.free(response);
+
         // Write response
-        const response = fbs.getWritten();
         if (response.len > 0) {
             var bytes_written: u32 = 0;
             _ = WriteFile(pipe, response.ptr, @intCast(response.len), &bytes_written, null);
