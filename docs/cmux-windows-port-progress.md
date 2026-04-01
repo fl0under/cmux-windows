@@ -165,6 +165,24 @@ Current behavior:
 - Sidebar title updates continue to flow through the shared title-sync path used by the runtime
 - Sidebar git branch and PR number can now refresh from cwd changes for native git workspaces, though ports and shell-type detection are still incomplete
 
+### 6. Sidebar shell metadata surfaced in live workspace chrome
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - shell-type metadata surfaced in sidebar entries
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` to infer sidebar shell type from the configured launch command when new workspaces are created
+- Expanded `src/cmux/ui/Sidebar.zig` metadata rendering to show shell labels alongside git branch / PR / ports when available
+- Kept shell metadata wiring lightweight and local to the sidebar model without disturbing the underlying terminal launch path
+
+Current behavior:
+
+- New sidebar workspaces now expose shell-type metadata such as PowerShell, CMD, or Git Bash in the visible workspace chrome
+- Existing sidebar git/PR metadata remains visible and is now grouped with shell metadata in a single rendered line
+- Shell metadata still reflects configured launch intent rather than per-workspace runtime detection, so WSL/native divergence is still incomplete
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -202,7 +220,7 @@ image or cross-compilation environment.
 ### Sidebar / workspace UI
 
 - Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
-- Sidebar metadata rendering now has slots for git branch, PR number, and ports; branch/PR can refresh from cwd updates, but population is still incomplete overall
+- Sidebar metadata rendering now has slots for shell type, git branch, PR number, and ports; live population is still incomplete overall
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
 - Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection/layout paths still assume the legacy top tab bar
 
@@ -226,6 +244,7 @@ image or cross-compilation environment.
 ### Shell / metadata / integration
 
 - WSL/native shell detection and port metadata are not yet live in the sidebar
+- Sidebar shell metadata currently reflects configured command inference rather than true per-workspace runtime detection
 - Current git metadata refresh assumes native git invocation; WSL-aware sidebar metadata refresh is still pending
 - Shell integration scripts exist but are not yet fully connected end-to-end to sidebar state
 

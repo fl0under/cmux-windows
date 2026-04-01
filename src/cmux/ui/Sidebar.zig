@@ -423,8 +423,15 @@ pub const Sidebar = struct {
         const writer = stream.writer();
         var has_value = false;
 
+        const shell_label = tab.shell_type.displayName();
+        if (shell_label.len > 0 and tab.shell_type != .custom) {
+            writer.writeAll(shell_label) catch return stream.getWritten();
+            has_value = true;
+        }
+
         const branch = tab.getGitBranch();
         if (branch.len > 0) {
+            if (has_value) writer.writeAll(" | ") catch return stream.getWritten();
             writer.writeAll(branch) catch return stream.getWritten();
             has_value = true;
         }

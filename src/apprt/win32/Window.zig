@@ -13,6 +13,7 @@ const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
 const Theme = @import("../../cmux/ui/Theme.zig").Theme;
 const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
+const Workspace = @import("../../cmux/workspace/Workspace.zig").Workspace;
 const GitStatus = @import("../../cmux/git/GitStatus.zig").GitStatus;
 const w32 = @import("win32.zig");
 
@@ -353,6 +354,7 @@ pub fn addTab(self: *Window) !*Surface {
         var title_buf: [64]u8 = undefined;
         const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
         self.sidebar_tabs[pos] = SidebarTab.init(default_name);
+        self.sidebar_tabs[pos].shell_type = self.detectSidebarShellType();
         self.sidebar_tabs[pos].is_active = (pos == self.active_tab);
         if (pos >= sidebar.tabs.items.len) {
             _ = sidebar.addTab(default_name) catch {};
@@ -367,6 +369,13 @@ pub fn addTab(self: *Window) !*Surface {
 
     self.updateTabBarVisibility();
     return surface;
+}
+
+fn detectSidebarShellType(self: *const Window) SidebarTab.ShellType {
+    const command = self.app.config.command orelse return .cmd;
+    const command_string = command.string(self.app.core_app.alloc) catch return .custom;
+    defer self.app.core_app.alloc.free(command_string);
+    return Workspace.ShellType.fromCommand(command_string).toTabShellType();
 }
 
 /// Close a tab by surface pointer. Removes from the tab list,
