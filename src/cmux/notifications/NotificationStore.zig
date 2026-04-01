@@ -47,6 +47,10 @@ pub const NotificationStore = struct {
     ) usize {
         const idx = (self.head + self.count) % MAX_ENTRIES;
 
+        if (self.count == MAX_ENTRIES and !self.entries[idx].is_read) {
+            self.total_unread -|= 1;
+        }
+
         var entry = &self.entries[idx];
         entry.workspace_id = workspace_id;
         entry.timestamp = std.time.timestamp();
@@ -118,6 +122,19 @@ pub const NotificationStore = struct {
         return null;
     }
 
+    /// Find the latest notification for a specific workspace, regardless of read state.
+    pub fn findLatestForWorkspace(self: *const NotificationStore, workspace_id: u32) ?usize {
+        if (self.count == 0) return null;
+
+        var i = self.count;
+        while (i > 0) {
+            i -= 1;
+            const idx = (self.head + i) % MAX_ENTRIES;
+            if (self.entries[idx].workspace_id == workspace_id) return idx;
+        }
+        return null;
+    }
+
     /// Count unread notifications for a specific workspace.
     pub fn unreadCountForWorkspace(self: *const NotificationStore, workspace_id: u32) usize {
         var count: usize = 0;
@@ -184,4 +201,34 @@ test "NotificationStore: find unread" {
 
     const ws1_latest = store.findLatestUnreadForWorkspace(1).?;
     try std.testing.expectEqual(idx3, ws1_latest);
+}
+
+test "NotificationStore: overwrite unread adjusts total_unread" {
+    var store = NotificationStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    for (0..NotificationStore.MAX_ENTRIES) |i| {
+        var title_buf: [16]u8 = undefined;
+        const title = std.fmt.bufPrint(&title_buf, "N{d}", .{i}) catch unreachable;
+        _ = store.add(1, title, "");
+    }
+
+    try std.testing.expectEqual(@as(usize, NotificationStore.MAX_ENTRIES), store.total_unread);
+
+    _ = store.add(1, "overflow", "");
+
+    try std.testing.expectEqual(@as(usize, NotificationStore.MAX_ENTRIES), store.total_unread);
+}
+
+test "NotificationStore: latest for workspace includes read entries" {
+    var store = NotificationStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    _ = store.add(2, "Other", "");
+    const idx = store.add(1, "Latest", "Body");
+    store.markRead(idx);
+
+    const latest = store.findLatestForWorkspace(1).?;
+    try std.testing.expectEqual(idx, latest);
+    try std.testing.expectEqualStrings("Latest", store.get(latest).?.getTitle());
 }

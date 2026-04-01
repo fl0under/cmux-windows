@@ -266,6 +266,13 @@ pub fn run(self: *App) !void {
         if (msg.message == w32.WM_KEYDOWN and msg.hwnd != null) {
             const vk: u16 = @intCast(msg.wParam & 0xFFFF);
 
+            if (vk == 'I' and w32.GetKeyState(w32.VK_CONTROL) < 0) {
+                if (self.core_app.focusedSurface()) |focused| {
+                    focused.rt_surface.parent_window.toggleNotificationPanel();
+                    continue;
+                }
+            }
+
             // Check if this edit is a tab rename edit
             if (vk == w32.VK_RETURN or vk == w32.VK_ESCAPE) {
                 for (self.windows.items) |win| {
@@ -608,6 +615,7 @@ pub fn performAction(
                     const parent = core_surface.rt_surface.parent_window;
                     if (parent.findTabIndex(core_surface.rt_surface)) |tab_idx| {
                         parent.addSidebarNotification(tab_idx, value.body);
+                        parent.refreshNotificationUiForTab(tab_idx);
                     }
                 },
             }
