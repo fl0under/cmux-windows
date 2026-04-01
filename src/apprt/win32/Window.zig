@@ -11,6 +11,7 @@ const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
+const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -39,6 +40,9 @@ tab_bar_visible: bool = false,
 
 /// Optional cmux vertical workspace sidebar.
 sidebar: ?Sidebar = null,
+
+/// Sidebar metadata mirrored from the live tab model.
+sidebar_tabs: [64]SidebarTab = undefined,
 
 /// DPI scale factor (DPI / 96.0).
 scale: f32 = 1.0,
@@ -113,6 +117,9 @@ pub fn init(self: *Window, app: *App, options: InitOptions) !void {
 
     if (!options.is_quick_terminal) {
         self.sidebar = Sidebar.init(app.core_app.alloc);
+        for (0..self.sidebar_tabs.len) |i| {
+            self.sidebar_tabs[i] = SidebarTab.init("");
+        }
     }
 
     const style: u32 = if (options.is_quick_terminal) w32.WS_POPUP else w32.WS_OVERLAPPEDWINDOW;
@@ -341,6 +348,8 @@ pub fn addTab(self: *Window) !*Surface {
     if (self.sidebar) |*sidebar| {
         var title_buf: [64]u8 = undefined;
         const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
+        self.sidebar_tabs[pos] = SidebarTab.init(default_name);
+        self.sidebar_tabs[pos].is_active = (pos == self.active_tab);
         if (pos >= sidebar.tabs.items.len) {
             _ = sidebar.addTab(default_name) catch {};
         } else {
@@ -376,6 +385,7 @@ fn closeTabByIndex(self: *Window, idx: usize) void {
         self.tab_active_surface[i] = self.tab_active_surface[i + 1];
         self.tab_titles[i] = self.tab_titles[i + 1];
         self.tab_title_lens[i] = self.tab_title_lens[i + 1];
+        self.sidebar_tabs[i] = self.sidebar_tabs[i + 1];
     }
 
     if (self.sidebar) |*sidebar| {
@@ -500,7 +510,11 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     if (surface.hwnd) |h| _ = w32.SetFocus(h);
     self.updateWindowTitle();
     if (self.sidebar) |*sidebar| {
+        for (0..self.tab_count) |i| {
+            self.sidebar_tabs[i].is_active = (i == idx);
+        }
         sidebar.setActiveTab(idx);
+        sidebar.updateTab(idx, self.sidebar_tabs[idx]);
     }
 }
 
@@ -528,7 +542,9 @@ pub fn renameTabIndex(self: *Window, idx: usize, title: [:0]const u8) void {
     const surface = self.tab_active_surface[idx];
     self.onTabTitleChanged(surface, title);
     if (self.sidebar) |*sidebar| {
+        self.sidebar_tabs[idx].setName(std.mem.span(title));
         sidebar.renameTab(idx, std.mem.span(title));
+        sidebar.updateTab(idx, self.sidebar_tabs[idx]);
     }
 }
 
@@ -953,8 +969,20 @@ pub fn onTabTitleChanged(self: *Window, surface: *Surface, title: [:0]const u8) 
     const len: u16 = @intCast(@min(wlen, 255));
     @memcpy(self.tab_titles[tab_idx][0..len], wbuf[0..len]);
     self.tab_title_lens[tab_idx] = len;
+    self.sidebar_tabs[tab_idx].setName(std.mem.span(title));
     if (tab_idx == self.active_tab) self.updateWindowTitle();
+    if (self.sidebar) |*sidebar| {
+        sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    }
     self.invalidateTabBar();
+}
+
+pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) void {
+    if (tab_idx >= self.tab_count) return;
+    self.sidebar_tabs[tab_idx].addNotification(text);
+    if (self.sidebar) |*sidebar| {
+        sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
+    }
 }
 
 /// Update tab bar visibility based on config and tab count.

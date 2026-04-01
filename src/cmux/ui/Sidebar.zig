@@ -309,6 +309,28 @@ pub const Sidebar = struct {
                 }
             }
 
+            // Latest notification snippet / cwd fallback
+            const detail = if (tab.last_notification_len > 0)
+                tab.last_notification[0..tab.last_notification_len]
+            else
+                tab.getCwd();
+            if (detail.len > 0) {
+                var detail_rect = tab_rect;
+                detail_rect.top += Theme.scaled(18, self.scale);
+                _ = w32.SetTextColor(hdc, self.theme.sidebar_text_dim.toColorRef());
+                var detail_buf: [256]u16 = undefined;
+                const detail_len = std.unicode.utf8ToUtf16Le(&detail_buf, detail) catch 0;
+                if (detail_len > 0) {
+                    _ = w32.DrawTextW(
+                        hdc,
+                        @ptrCast(&detail_buf),
+                        @intCast(detail_len),
+                        &detail_rect,
+                        w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+                    );
+                }
+            }
+
             // Notification badge
             if (tab.unread_count > 0) {
                 const badge_size = Theme.scaled(Theme.notification_badge_size, self.scale);
