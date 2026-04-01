@@ -220,6 +220,23 @@ Current behavior:
 - Sidebar ports now better track dev servers launched under the workspace shell rather than only ports owned by the shell process itself
 - Port attribution is still limited to Windows process-tree visibility and interesting TCP listeners; broader protocol/state attribution is still pending
 
+### 9. Sidebar polish and legacy-tab dependency reduced further
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - sidebar GDI polish and fewer live tab-bar assumptions
+
+What landed in this slice:
+
+- Refined `src/cmux/ui/Sidebar.zig` GDI rendering with tighter text columns, active outlines, viewport clipping, and a more visible new-workspace affordance
+- Updated `src/apprt/win32/Window.zig` invalidation so sidebar mode repaints the sidebar child directly instead of routing through hidden top-tab assumptions
+- Reduced live message-loop dependence on legacy tab-bar hover state when the sidebar is active
+
+Current behavior:
+
+- Sidebar mode now behaves more like the primary workspace chrome and less like a mirror layered on top of a hidden tab bar
+- The interim GDI sidebar is still not full Direct2D/DirectWrite quality, but it is visually closer to a finished workspace chrome
+
 ## Verified environment notes
 
 ### Local tools added during port work

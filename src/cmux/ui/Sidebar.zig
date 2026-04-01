@@ -27,6 +27,7 @@ pub const Sidebar = struct {
     drag_start_y: i32 = 0,
     drag_current_y: i32 = 0,
     tracking_mouse: bool = false,
+    hovered_new_workspace: bool = false,
 
     // Direct2D resources (opaque pointers, initialized on WM_CREATE)
     d2d_factory: ?*anyopaque = null,
@@ -264,6 +265,8 @@ pub const Sidebar = struct {
         const tab_h = Theme.scaled(Theme.sidebar_tab_height, self.scale);
         const padding = Theme.scaled(Theme.sidebar_tab_padding, self.scale);
         const header_height = Theme.scaled(40, self.scale); // Logo/drag area
+        const text_column_left = padding + Theme.scaled(10, self.scale);
+        const unread_column_width = Theme.scaled(28, self.scale);
 
         // Sidebar/content separator.
         var separator_rect = w32.RECT{
@@ -280,6 +283,7 @@ pub const Sidebar = struct {
 
         for (self.tabs.items, 0..) |tab, i| {
             const y = header_height + @as(i32, @intCast(i)) * tab_h + self.scroll_offset;
+            if (y + tab_h <= client_rect.top or y >= client_rect.bottom) continue;
 
             // Tab background
             const bg_color = if (i == self.active_tab)
@@ -303,6 +307,20 @@ pub const Sidebar = struct {
             }
 
             if (i == self.active_tab) {
+                const outline_pen = w32.CreatePen(0, 1, self.theme.sidebar_separator.toColorRef());
+                if (outline_pen) |pen| {
+                    const old_pen = w32.SelectObject(hdc, pen);
+                    _ = w32.MoveToEx(hdc, tab_rect.left, tab_rect.top, null);
+                    _ = w32.LineTo(hdc, tab_rect.right - 1, tab_rect.top);
+                    _ = w32.LineTo(hdc, tab_rect.right - 1, tab_rect.bottom - 1);
+                    _ = w32.LineTo(hdc, tab_rect.left, tab_rect.bottom - 1);
+                    _ = w32.LineTo(hdc, tab_rect.left, tab_rect.top);
+                    _ = w32.SelectObject(hdc, old_pen);
+                    _ = w32.DeleteObject(pen);
+                }
+            }
+
+            if (i == self.active_tab) {
                 var accent_rect = tab_rect;
                 accent_rect.right = accent_rect.left + Theme.scaled(4, self.scale);
                 const accent_brush = w32.CreateSolidBrush(self.theme.accent.toColorRef());
@@ -314,8 +332,9 @@ pub const Sidebar = struct {
 
             // Tab name text
             _ = w32.SetBkMode(hdc, w32.TRANSPARENT);
-            tab_rect.left += padding;
+            tab_rect.left = text_column_left;
             tab_rect.top += padding;
+            tab_rect.right -= unread_column_width;
             const title = tab.getName();
             self.drawTextLine(
                 hdc,
@@ -359,7 +378,7 @@ pub const Sidebar = struct {
             // Notification badge
             if (tab.unread_count > 0) {
                 const badge_size = Theme.scaled(Theme.notification_badge_size, self.scale);
-                const badge_x = Theme.scaled(self.width, self.scale) - padding * 3;
+                const badge_x = Theme.scaled(self.width, self.scale) - unread_column_width;
                 const badge_y = y + @divTrunc(tab_h, 2) - @divTrunc(badge_size, 2);
                 var badge_rect = w32.RECT{
                     .left = badge_x,
@@ -383,6 +402,29 @@ pub const Sidebar = struct {
             .right = Theme.scaled(self.width, self.scale) - padding,
             .bottom = btn_y + tab_h - padding,
         };
+        const new_workspace_bg = if (self.hovered_new_workspace)
+            self.theme.sidebar_tab_hover_bg
+        else
+            self.theme.sidebar_tab_bg;
+        const new_workspace_brush = w32.CreateSolidBrush(new_workspace_bg.toColorRef());
+        if (new_workspace_brush) |b| {
+            _ = w32.FillRect(hdc, &btn_rect, b);
+            _ = w32.DeleteObject(b);
+        }
+
+        const new_workspace_pen = w32.CreatePen(0, 1, self.theme.sidebar_separator.toColorRef());
+        if (new_workspace_pen) |pen| {
+            const old_pen = w32.SelectObject(hdc, pen);
+            _ = w32.MoveToEx(hdc, btn_rect.left, btn_rect.top, null);
+            _ = w32.LineTo(hdc, btn_rect.right - 1, btn_rect.top);
+            _ = w32.LineTo(hdc, btn_rect.right - 1, btn_rect.bottom - 1);
+            _ = w32.LineTo(hdc, btn_rect.left, btn_rect.bottom - 1);
+            _ = w32.LineTo(hdc, btn_rect.left, btn_rect.top);
+            _ = w32.SelectObject(hdc, old_pen);
+            _ = w32.DeleteObject(pen);
+        }
+
+        btn_rect.left = text_column_left;
         _ = w32.SetTextColor(hdc, self.theme.accent.toColorRef());
         const new_workspace = std.unicode.utf8ToUtf16LeStringLiteral("+ New Workspace");
         _ = w32.DrawTextW(
@@ -576,8 +618,13 @@ pub const Sidebar = struct {
                 const pt = getPoint(lparam);
                 const y = pt.y;
                 const new_hover = sidebar.hitTestTab(y);
+                const new_hover_new_workspace = sidebar.hitTestNewWorkspace(y);
                 if (new_hover != sidebar.hovered_tab) {
                     sidebar.hovered_tab = new_hover;
+                    sidebar.invalidate();
+                }
+                if (new_hover_new_workspace != sidebar.hovered_new_workspace) {
+                    sidebar.hovered_new_workspace = new_hover_new_workspace;
                     sidebar.invalidate();
                 }
                 if (sidebar.dragging_tab) |from| {
@@ -600,6 +647,7 @@ pub const Sidebar = struct {
             w32.WM_MOUSELEAVE => {
                 sidebar.tracking_mouse = false;
                 sidebar.hovered_tab = null;
+                sidebar.hovered_new_workspace = false;
                 sidebar.invalidate();
                 return 0;
             },

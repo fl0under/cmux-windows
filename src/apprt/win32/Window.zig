@@ -1176,6 +1176,9 @@ fn updateTabBarVisibility(self: *Window) void {
 pub fn invalidateTabBar(self: *Window) void {
     if (self.sidebar) |*sidebar| {
         sidebar.setActiveTab(self.active_tab);
+        if (sidebar.hwnd) |hwnd| {
+            _ = w32.InvalidateRect(hwnd, null, 0);
+        }
         return;
     }
     const hwnd = self.hwnd orelse return;
@@ -1468,6 +1471,24 @@ fn handleResize(self: *Window) void {
             sidebar.resize(rect.bottom - rect.top);
         }
     }
+    if (self.rename_sidebar_mode) {
+        if (self.rename_edit) |edit| {
+            const rect = self.sidebarRenameRect(self.rename_tab) orelse {
+                self.cancelTabRename();
+                self.layoutSplits();
+                self.invalidateTabBar();
+                return;
+            };
+            _ = w32.MoveWindow(
+                edit,
+                rect.left + 2,
+                rect.top + 2,
+                rect.right - rect.left - 4,
+                rect.bottom - rect.top - 4,
+                1,
+            );
+        }
+    }
     self.layoutSplits();
     self.invalidateTabBar();
 }
@@ -1702,6 +1723,7 @@ fn handleTabBarRightClick(self: *Window, x: i16, y: i16) void {
 
 /// Handle WM_MOUSELEAVE: reset all hover state and repaint.
 fn handleTabBarMouseLeave(self: *Window) void {
+    if (self.sidebar != null) return;
     self.tracking_mouse = false;
     if (self.hover_tab != -1 or self.hover_new_tab) {
         self.hover_tab = -1;
@@ -1976,7 +1998,15 @@ pub fn windowWndProc(
             return 0;
         },
         w32.WM_PAINT => {
-            window.paintTabBar();
+            if (window.sidebar == null) {
+                window.paintTabBar();
+            } else {
+                var ps: w32.PAINTSTRUCT = undefined;
+                const hdc = w32.BeginPaint(hwnd, &ps);
+                if (hdc != null) {
+                    _ = w32.EndPaint(hwnd, &ps);
+                }
+            }
             return 0;
         },
         Sidebar.WM_CMUX_TAB_CLICKED => {
@@ -2130,7 +2160,9 @@ pub fn windowWndProc(
             return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
         },
         w32.WM_MOUSELEAVE => {
-            window.handleTabBarMouseLeave();
+            if (window.sidebar == null) {
+                window.handleTabBarMouseLeave();
+            }
             return 0;
         },
         w32.WM_ACTIVATE => {
