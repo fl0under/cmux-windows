@@ -11,7 +11,9 @@ const App = @import("App.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("../../datastruct/split_tree.zig").SplitTree;
 const Sidebar = @import("../../cmux/ui/Sidebar.zig").Sidebar;
+const Theme = @import("../../cmux/ui/Theme.zig").Theme;
 const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
+const GitStatus = @import("../../cmux/git/GitStatus.zig").GitStatus;
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -74,6 +76,7 @@ drag_active: bool = false,
 rename_edit: ?w32.HWND = null,
 rename_font: ?*anyopaque = null,
 rename_tab: usize = 0,
+rename_sidebar_mode: bool = false,
 
 /// UTF-16 title buffers for each tab (for painting the tab bar).
 tab_titles: [64][256]u16 = undefined,
@@ -989,9 +992,52 @@ pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) v
 pub fn setSidebarCwd(self: *Window, tab_idx: usize, cwd: []const u8) void {
     if (tab_idx >= self.tab_count) return;
     self.sidebar_tabs[tab_idx].setCwd(cwd);
+    self.refreshSidebarGitMetadata(tab_idx);
     if (self.sidebar) |*sidebar| {
         sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
     }
+}
+
+fn refreshSidebarGitMetadata(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    const cwd = self.sidebar_tabs[tab_idx].getCwd();
+    if (cwd.len == 0) {
+        self.sidebar_tabs[tab_idx].setGitBranch("");
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    }
+
+    var git_status = GitStatus.init(self.app.core_app.alloc);
+    const branch = git_status.getBranch(cwd, false) catch {
+        self.sidebar_tabs[tab_idx].setGitBranch("");
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer self.app.core_app.alloc.free(branch);
+    self.sidebar_tabs[tab_idx].setGitBranch(branch);
+
+    const pr_status = git_status.getPrStatus(cwd, false) catch {
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer self.app.core_app.alloc.free(pr_status);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, self.app.core_app.alloc, pr_status, .{}) catch {
+        self.sidebar_tabs[tab_idx].pr_number = 0;
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value == .object) {
+        if (parsed.value.object.get("number")) |number_value| {
+            switch (number_value) {
+                .integer => |number| self.sidebar_tabs[tab_idx].pr_number = @intCast(@max(number, 0)),
+                else => self.sidebar_tabs[tab_idx].pr_number = 0,
+            }
+            return;
+        }
+    }
+    self.sidebar_tabs[tab_idx].pr_number = 0;
 }
 
 pub fn markSidebarRead(self: *Window, tab_idx: usize) void {
@@ -1603,14 +1649,43 @@ fn handleTabBarMouseLeave(self: *Window) void {
 /// Rename edit control child ID.
 const RENAME_EDIT_ID: u16 = 300;
 
+fn sidebarRenameRect(self: *Window, tab_idx: usize) ?w32.RECT {
+    const sidebar = self.sidebar orelse return null;
+    if (tab_idx >= self.tab_count or tab_idx >= sidebar.tabs.items.len) return null;
+
+    const scaled_width = sidebar.getWidth();
+    if (scaled_width <= 0) return null;
+
+    const tab_h = Theme.scaled(Theme.sidebar_tab_height, sidebar.scale);
+    const padding = Theme.scaled(Theme.sidebar_tab_padding, sidebar.scale);
+    const header_height = @as(i32, @intFromFloat(40.0 * sidebar.scale));
+    const y = header_height + @as(i32, @intCast(tab_idx)) * tab_h + sidebar.scroll_offset;
+    const right = scaled_width - (padding * 2) - Theme.scaled(Theme.notification_badge_size, sidebar.scale) - 6;
+    const bottom = y + tab_h - padding - 22;
+
+    if (right <= padding + 6 or bottom <= y + 4) return null;
+
+    return .{
+        .left = padding + 6,
+        .top = y + 4,
+        .right = right,
+        .bottom = bottom,
+    };
+}
+
 /// Start inline editing of a tab title. Creates a small Edit control
 /// overlay on the tab and pre-fills it with the current title.
 pub fn startTabRename(self: *Window, tab_idx: usize) void {
     // Cancel any existing rename
     self.cancelTabRename();
+    if (tab_idx >= self.tab_count) return;
 
     const hwnd = self.hwnd orelse return;
-    const rect = self.tab_rects[tab_idx];
+    const use_sidebar_rect = self.sidebar != null;
+    const rect = if (use_sidebar_rect)
+        self.sidebarRenameRect(tab_idx) orelse return
+    else
+        self.tab_rects[tab_idx];
 
     // Create an Edit control overlaid on the tab
     const edit = w32.CreateWindowExW(
@@ -1669,6 +1744,7 @@ pub fn startTabRename(self: *Window, tab_idx: usize) void {
     _ = w32.SetFocus(edit);
     self.rename_edit = edit;
     self.rename_tab = tab_idx;
+    self.rename_sidebar_mode = use_sidebar_rect;
 }
 
 /// Apply the edit text as the new tab title and destroy the edit control.
@@ -1680,14 +1756,19 @@ pub fn finishTabRename(self: *Window) void {
     var wbuf: [256]u16 = undefined;
     const wlen: usize = @intCast(w32.GetWindowTextW(edit, &wbuf, 256));
     if (wlen > 0) {
-        const len: u16 = @intCast(@min(wlen, 255));
-        @memcpy(self.tab_titles[tab_idx][0..len], wbuf[0..len]);
-        self.tab_title_lens[tab_idx] = len;
-        if (tab_idx == self.active_tab) self.updateWindowTitle();
+        var utf8_buf: [256]u8 = undefined;
+        const title = std.unicode.utf16LeToUtf8(&utf8_buf, wbuf[0..wlen]) catch utf8_buf[0..0];
+        if (title.len > 0) {
+            var title_z_buf: [257]u8 = undefined;
+            @memcpy(title_z_buf[0..title.len], title);
+            title_z_buf[title.len] = 0;
+            self.renameTabIndex(tab_idx, title_z_buf[0..title.len :0]);
+        }
     }
 
     _ = w32.DestroyWindow(edit);
     self.rename_edit = null;
+    self.rename_sidebar_mode = false;
     if (self.rename_font) |f| {
         _ = w32.DeleteObject(f);
         self.rename_font = null;
@@ -1705,6 +1786,7 @@ pub fn cancelTabRename(self: *Window) void {
     if (self.rename_edit) |edit| {
         _ = w32.DestroyWindow(edit);
         self.rename_edit = null;
+        self.rename_sidebar_mode = false;
         if (self.rename_font) |f| {
             _ = w32.DeleteObject(f);
             self.rename_font = null;

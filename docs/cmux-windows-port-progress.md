@@ -146,6 +146,25 @@ Current behavior:
 - Right-click and drag interactions can flow through the sidebar itself instead of relying on top-tab assumptions
 - Sidebar now exposes more of the metadata already present in the workspace model, though live git/port discovery is still incomplete
 
+### 5. Sidebar rename path and git metadata wiring tightened
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - sidebar-native rename rects and git metadata refresh
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` inline rename flow to use sidebar-relative geometry when the sidebar is the active workspace chrome
+- Switched rename commit handling to route through the existing tab-title update path so sidebar state stays synchronized
+- Added lightweight git/PR metadata refresh from live `pwd` updates using `src/cmux/git/GitStatus.zig`
+- Kept the legacy top-tab rename path intact for non-sidebar cases while making the sidebar path the primary visible one
+
+Current behavior:
+
+- Double-click rename from the sidebar now targets the visible sidebar workspace entry instead of hidden top-tab rectangles
+- Sidebar title updates continue to flow through the shared title-sync path used by the runtime
+- Sidebar git branch and PR number can now refresh from cwd changes for native git workspaces, though ports and shell-type detection are still incomplete
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -183,9 +202,9 @@ image or cross-compilation environment.
 ### Sidebar / workspace UI
 
 - Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
-- Sidebar metadata rendering now has slots for git branch, PR number, and ports, but live population is still incomplete
+- Sidebar metadata rendering now has slots for git branch, PR number, and ports; branch/PR can refresh from cwd updates, but population is still incomplete overall
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
-- Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection paths still assume the legacy top tab bar
+- Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection/layout paths still assume the legacy top tab bar
 
 ### Notifications
 
@@ -206,7 +225,8 @@ image or cross-compilation environment.
 
 ### Shell / metadata / integration
 
-- WSL/native shell detection and git/port metadata are not yet live in the sidebar
+- WSL/native shell detection and port metadata are not yet live in the sidebar
+- Current git metadata refresh assumes native git invocation; WSL-aware sidebar metadata refresh is still pending
 - Shell integration scripts exist but are not yet fully connected end-to-end to sidebar state
 
 ### Remote / SSH / teams workflows
