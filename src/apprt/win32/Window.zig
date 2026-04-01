@@ -1411,6 +1411,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
     const saved_surface = self.tab_active_surface[from];
     const saved_title = self.tab_titles[from];
     const saved_title_len = self.tab_title_lens[from];
+    const saved_sidebar_tab = self.sidebar_tabs[from];
 
     if (from < to) {
         // Shift left: move [from+1..to+1] to [from..to]
@@ -1420,6 +1421,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
             self.tab_active_surface[i] = self.tab_active_surface[i + 1];
             self.tab_titles[i] = self.tab_titles[i + 1];
             self.tab_title_lens[i] = self.tab_title_lens[i + 1];
+            self.sidebar_tabs[i] = self.sidebar_tabs[i + 1];
         }
     } else {
         // Shift right: move [to..from] to [to+1..from+1]
@@ -1429,6 +1431,7 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
             self.tab_active_surface[i] = self.tab_active_surface[i - 1];
             self.tab_titles[i] = self.tab_titles[i - 1];
             self.tab_title_lens[i] = self.tab_title_lens[i - 1];
+            self.sidebar_tabs[i] = self.sidebar_tabs[i - 1];
         }
     }
 
@@ -1437,11 +1440,18 @@ fn moveTabTo(self: *Window, from: usize, to: usize) void {
     self.tab_active_surface[to] = saved_surface;
     self.tab_titles[to] = saved_title;
     self.tab_title_lens[to] = saved_title_len;
+    self.sidebar_tabs[to] = saved_sidebar_tab;
 
     self.active_tab = to;
+    for (0..self.tab_count) |i| {
+        self.sidebar_tabs[i].is_active = (i == self.active_tab);
+    }
     if (self.sidebar) |*sidebar| {
         sidebar.reorderTab(from, to);
         sidebar.setActiveTab(self.active_tab);
+        for (0..self.tab_count) |i| {
+            sidebar.updateTab(i, self.sidebar_tabs[i]);
+        }
     }
     self.invalidateTabBar();
 }
@@ -1843,6 +1853,11 @@ pub fn windowWndProc(
             const from: usize = @intCast((wparam >> 16) & 0xFFFF);
             const to: usize = @intCast(wparam & 0xFFFF);
             window.moveTabTo(from, to);
+            return 0;
+        },
+        Sidebar.WM_CMUX_TAB_CONTEXT => {
+            const tab_idx: usize = @intCast(wparam & 0xFFFF);
+            window.handleSidebarRightClick(tab_idx);
             return 0;
         },
         w32.WM_SETFOCUS => {

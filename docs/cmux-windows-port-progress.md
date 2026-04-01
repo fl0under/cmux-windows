@@ -6,7 +6,7 @@ passes can resume quickly and keep the summary up to date.
 ## Last updated
 
 - Date: 2026-04-01
-- Branch: `cursor/cmux-windows-feature-parity-a423`
+- Branch: `cursor/cmux-sidebar-features-a87b`
 
 ## Upstream reference
 
@@ -123,6 +123,29 @@ Current behavior:
 - Workspace titles and basic notification snippets can flow into the sidebar model
 - The sidebar remains a partial cmux port rather than a full metadata-complete implementation
 
+### 4. Sidebar interaction path promoted toward primary workspace chrome
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - native sidebar drag reorder and metadata sync follow-up
+
+What landed in this slice:
+
+- Fixed `src/apprt/win32/Window.zig` tab moves so `sidebar_tabs` metadata now reorders with the live tab model
+- Added native drag-reorder handling inside `src/cmux/ui/Sidebar.zig`
+- Wired sidebar context-menu messages back into `Window.zig` so right-click actions are handled from the sidebar path
+- Expanded GDI sidebar rendering to show existing per-workspace metadata when available:
+  - git branch
+  - PR number
+  - listening ports
+- Added active-workspace accenting and sidebar/content separator polish in the interim GDI renderer
+
+Current behavior:
+
+- Sidebar reorder now updates both workspace position and mirrored sidebar metadata together
+- Right-click and drag interactions can flow through the sidebar itself instead of relying on top-tab assumptions
+- Sidebar now exposes more of the metadata already present in the workspace model, though live git/port discovery is still incomplete
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -160,13 +183,9 @@ image or cross-compilation environment.
 ### Sidebar / workspace UI
 
 - Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
-- Sidebar metadata is still minimal; it does not yet fully show:
-  - git branch
-  - PR status/number
-  - ports
+- Sidebar metadata rendering now has slots for git branch, PR number, and ports, but live population is still incomplete
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
-- Sidebar-driven rename, reorder, and context menus still need to become the primary path
-- Sidebar drag reorder is still not fully native through the sidebar itself
+- Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection paths still assume the legacy top tab bar
 
 ### Notifications
 

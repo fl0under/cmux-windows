@@ -26,6 +26,7 @@ pub const Sidebar = struct {
     dragging_tab: ?usize = null,
     drag_start_y: i32 = 0,
     drag_current_y: i32 = 0,
+    tracking_mouse: bool = false,
 
     // Direct2D resources (opaque pointers, initialized on WM_CREATE)
     d2d_factory: ?*anyopaque = null,
@@ -264,7 +265,18 @@ pub const Sidebar = struct {
         const padding = Theme.scaled(Theme.sidebar_tab_padding, self.scale);
         const header_height = Theme.scaled(40, self.scale); // Logo/drag area
 
-        _ = client_rect;
+        // Sidebar/content separator.
+        var separator_rect = w32.RECT{
+            .left = client_rect.right - 1,
+            .top = client_rect.top,
+            .right = client_rect.right,
+            .bottom = client_rect.bottom,
+        };
+        const separator_brush = w32.CreateSolidBrush(self.theme.sidebar_separator.toColorRef());
+        if (separator_brush) |b| {
+            _ = w32.FillRect(hdc, &separator_rect, b);
+            _ = w32.DeleteObject(b);
+        }
 
         for (self.tabs.items, 0..) |tab, i| {
             const y = header_height + @as(i32, @intCast(i)) * tab_h + self.scroll_offset;
@@ -290,25 +302,28 @@ pub const Sidebar = struct {
                 _ = w32.DeleteObject(b);
             }
 
+            if (i == self.active_tab) {
+                var accent_rect = tab_rect;
+                accent_rect.right = accent_rect.left + Theme.scaled(4, self.scale);
+                const accent_brush = w32.CreateSolidBrush(self.theme.accent.toColorRef());
+                if (accent_brush) |b| {
+                    _ = w32.FillRect(hdc, &accent_rect, b);
+                    _ = w32.DeleteObject(b);
+                }
+            }
+
             // Tab name text
             _ = w32.SetBkMode(hdc, w32.TRANSPARENT);
-            _ = w32.SetTextColor(hdc, self.theme.sidebar_text.toColorRef());
             tab_rect.left += padding;
             tab_rect.top += padding;
             const title = tab.getName();
-            if (title.len > 0) {
-                var title_buf: [128]u16 = undefined;
-                const title_len = std.unicode.utf8ToUtf16Le(&title_buf, title) catch 0;
-                if (title_len > 0) {
-                    _ = w32.DrawTextW(
-                        hdc,
-                        @ptrCast(&title_buf),
-                        @intCast(title_len),
-                        &tab_rect,
-                        w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
-                    );
-                }
-            }
+            self.drawTextLine(
+                hdc,
+                title,
+                &tab_rect,
+                self.theme.sidebar_text.toColorRef(),
+                w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+            );
 
             // Latest notification snippet / cwd fallback
             const detail = if (tab.last_notification_len > 0)
@@ -318,18 +333,27 @@ pub const Sidebar = struct {
             if (detail.len > 0) {
                 var detail_rect = tab_rect;
                 detail_rect.top += Theme.scaled(18, self.scale);
-                _ = w32.SetTextColor(hdc, self.theme.sidebar_text_dim.toColorRef());
-                var detail_buf: [256]u16 = undefined;
-                const detail_len = std.unicode.utf8ToUtf16Le(&detail_buf, detail) catch 0;
-                if (detail_len > 0) {
-                    _ = w32.DrawTextW(
-                        hdc,
-                        @ptrCast(&detail_buf),
-                        @intCast(detail_len),
-                        &detail_rect,
-                        w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
-                    );
-                }
+                self.drawTextLine(
+                    hdc,
+                    detail,
+                    &detail_rect,
+                    self.theme.sidebar_text_dim.toColorRef(),
+                    w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+                );
+            }
+
+            var metadata_buf: [128]u8 = undefined;
+            const metadata = self.formatTabMetadata(tab, &metadata_buf);
+            if (metadata.len > 0) {
+                var metadata_rect = tab_rect;
+                metadata_rect.top += Theme.scaled(34, self.scale);
+                self.drawTextLine(
+                    hdc,
+                    metadata,
+                    &metadata_rect,
+                    self.theme.accent.toColorRef(),
+                    w32.DT_LEFT | w32.DT_TOP | w32.DT_SINGLELINE | w32.DT_END_ELLIPSIS | w32.DT_NOPREFIX,
+                );
             }
 
             // Notification badge
@@ -370,6 +394,59 @@ pub const Sidebar = struct {
         );
     }
 
+    fn drawTextLine(
+        self: *Sidebar,
+        hdc: w32.HDC,
+        text: []const u8,
+        rect: *w32.RECT,
+        color: u32,
+        format: u32,
+    ) void {
+        _ = self;
+        if (text.len == 0) return;
+        _ = w32.SetTextColor(hdc, color);
+        var text_buf: [256]u16 = undefined;
+        const text_len = std.unicode.utf8ToUtf16Le(&text_buf, text) catch 0;
+        if (text_len == 0) return;
+        _ = w32.DrawTextW(
+            hdc,
+            @ptrCast(&text_buf),
+            @intCast(text_len),
+            rect,
+            format,
+        );
+    }
+
+    fn formatTabMetadata(self: *Sidebar, tab: SidebarTab, buf: []u8) []const u8 {
+        _ = self;
+        var stream = std.io.fixedBufferStream(buf);
+        const writer = stream.writer();
+        var has_value = false;
+
+        const branch = tab.getGitBranch();
+        if (branch.len > 0) {
+            writer.writeAll(branch) catch return stream.getWritten();
+            has_value = true;
+        }
+
+        if (tab.pr_number > 0) {
+            if (has_value) writer.writeAll(" | ") catch return stream.getWritten();
+            writer.print("PR #{d}", .{tab.pr_number}) catch return stream.getWritten();
+            has_value = true;
+        }
+
+        if (tab.port_count > 0) {
+            if (has_value) writer.writeAll(" | ") catch return stream.getWritten();
+            writer.writeAll(":") catch return stream.getWritten();
+            for (tab.ports[0..tab.port_count], 0..) |port, idx| {
+                if (idx > 0) writer.writeAll(",") catch return stream.getWritten();
+                writer.print("{d}", .{port}) catch return stream.getWritten();
+            }
+        }
+
+        return stream.getWritten();
+    }
+
     /// Hit-test to determine which tab (if any) was clicked.
     fn hitTestTab(self: *Sidebar, y: i32) ?usize {
         const tab_h = Theme.scaled(Theme.sidebar_tab_height, self.scale);
@@ -389,6 +466,37 @@ pub const Sidebar = struct {
         const padding = Theme.scaled(Theme.sidebar_tab_padding, self.scale);
         const btn_y = header_height + @as(i32, @intCast(self.tabs.items.len)) * tab_h + self.scroll_offset + padding;
         return y >= btn_y and y < btn_y + tab_h - padding;
+    }
+
+    fn dragTargetForY(self: *Sidebar, y: i32) ?usize {
+        if (self.tabs.items.len == 0) return null;
+        const tab_h = Theme.scaled(Theme.sidebar_tab_height, self.scale);
+        const header_height = Theme.scaled(40, self.scale);
+        const adjusted_y = y - header_height - self.scroll_offset;
+        if (adjusted_y <= 0) return 0;
+        const raw_index = @divTrunc(adjusted_y, tab_h);
+        const clamped = std.math.clamp(raw_index, 0, @as(i32, @intCast(self.tabs.items.len - 1)));
+        return @intCast(clamped);
+    }
+
+    fn ensureMouseLeaveTracking(self: *Sidebar) void {
+        if (self.tracking_mouse) return;
+        const hwnd = self.hwnd orelse return;
+        var tme = w32.TRACKMOUSEEVENT{
+            .cbSize = @sizeOf(w32.TRACKMOUSEEVENT),
+            .dwFlags = w32.TME_LEAVE,
+            .hwndTrack = hwnd,
+            .dwHoverTime = 0,
+        };
+        _ = w32.TrackMouseEvent(&tme);
+        self.tracking_mouse = true;
+    }
+
+    fn clearDrag(self: *Sidebar) void {
+        self.dragging_tab = null;
+        self.drag_start_y = 0;
+        self.drag_current_y = 0;
+        _ = w32.ReleaseCapture();
     }
 
     fn getPoint(lparam: isize) struct { x: i32, y: i32 } {
@@ -415,6 +523,10 @@ pub const Sidebar = struct {
                 const pt = getPoint(lparam);
                 const y = pt.y;
                 if (sidebar.hitTestTab(y)) |tab_index| {
+                    sidebar.dragging_tab = tab_index;
+                    sidebar.drag_start_y = y;
+                    sidebar.drag_current_y = y;
+                    if (sidebar.hwnd) |child| _ = w32.SetCapture(child);
                     sidebar.setActiveTab(tab_index);
                     // Notify parent
                     if (sidebar.parent_hwnd) |parent| {
@@ -425,6 +537,10 @@ pub const Sidebar = struct {
                         _ = w32.PostMessageW(parent, Sidebar.WM_CMUX_NEW_WORKSPACE, 0, 0);
                     }
                 }
+                return 0;
+            },
+            w32.WM_LBUTTONUP => {
+                sidebar.clearDrag();
                 return 0;
             },
             w32.WM_LBUTTONDBLCLK => {
@@ -449,15 +565,33 @@ pub const Sidebar = struct {
                 return w32.DefWindowProcW(hwnd, msg, wparam, lparam);
             },
             w32.WM_MOUSEMOVE => {
-                const y = getPoint(lparam).y;
+                sidebar.ensureMouseLeaveTracking();
+                const pt = getPoint(lparam);
+                const y = pt.y;
                 const new_hover = sidebar.hitTestTab(y);
                 if (new_hover != sidebar.hovered_tab) {
                     sidebar.hovered_tab = new_hover;
                     sidebar.invalidate();
                 }
+                if (sidebar.dragging_tab) |from| {
+                    sidebar.drag_current_y = y;
+                    const delta = if (y >= sidebar.drag_start_y) y - sidebar.drag_start_y else sidebar.drag_start_y - y;
+                    if (delta >= Theme.scaled(6, sidebar.scale)) {
+                        if (sidebar.dragTargetForY(y)) |to| {
+                            if (to != from) {
+                                sidebar.dragging_tab = to;
+                                if (sidebar.parent_hwnd) |parent| {
+                                    const payload = (@as(usize, from) << 16) | @as(usize, to);
+                                    _ = w32.SendMessageW(parent, Sidebar.WM_CMUX_TAB_REORDER, payload, 0);
+                                }
+                            }
+                        }
+                    }
+                }
                 return 0;
             },
             w32.WM_MOUSELEAVE => {
+                sidebar.tracking_mouse = false;
                 sidebar.hovered_tab = null;
                 sidebar.invalidate();
                 return 0;
