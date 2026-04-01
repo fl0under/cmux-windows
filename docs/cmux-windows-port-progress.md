@@ -205,9 +205,9 @@ Current behavior:
 
 ### 8. Sidebar port attribution extended to child process trees
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - child-process-tree port attribution for sidebar workspaces
+- `48b930b9d` - `feat(win32): follow child process ports in sidebar`
 
 What landed in this slice:
 
