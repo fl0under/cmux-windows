@@ -125,9 +125,9 @@ Current behavior:
 
 ### 4. Sidebar interaction path promoted toward primary workspace chrome
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - native sidebar drag reorder and metadata sync follow-up
+- `b8ad8077f` - `feat(win32): promote sidebar workspace interactions`
 
 What landed in this slice:
 
