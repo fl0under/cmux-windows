@@ -237,6 +237,25 @@ Current behavior:
 - Sidebar mode now behaves more like the primary workspace chrome and less like a mirror layered on top of a hidden tab bar
 - The interim GDI sidebar is still not full Direct2D/DirectWrite quality, but it is visually closer to a finished workspace chrome
 
+### 10. Sidebar Direct2D/DirectWrite renderer brought online
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - Direct2D/DirectWrite sidebar path with GDI fallback retained
+
+What landed in this slice:
+
+- Added a first real Direct2D/DirectWrite render path in `src/cmux/ui/Sidebar.zig`
+- Kept the current GDI renderer as a fallback when Direct2D/DirectWrite resource creation fails
+- Wired sidebar resize handling to resize the Direct2D hwnd render target when available
+- Preserved the existing metadata, badge, active-state, and new-workspace visuals across the new renderer path
+
+Current behavior:
+
+- Sidebar rendering now prefers a native Direct2D/DirectWrite path instead of always using the interim GDI fallback
+- Existing sidebar behavior stays intact because the GDI renderer remains available as a fallback path
+- The sidebar is much closer to a finished native workspace chrome; remaining sidebar work is mostly minor edge cleanup rather than a missing renderer
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -273,7 +292,7 @@ image or cross-compilation environment.
 
 ### Sidebar / workspace UI
 
-- Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
+- Sidebar now has a Direct2D/DirectWrite render path with GDI fallback retained for resilience
 - Sidebar metadata rendering now has slots for shell type, git branch, PR number, and ports; runtime population is improved but still incomplete overall
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
 - Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection/layout paths still assume the legacy top tab bar
@@ -298,7 +317,7 @@ image or cross-compilation environment.
 ### Shell / metadata / integration
 
 - Sidebar shell metadata now uses live exec argv classification for active workspaces, but deeper runtime/process-tree detection is still incomplete
-- Sidebar port metadata now has a first live Windows listener scan, but only for directly owned process handles rather than full descendant trees
+- Sidebar port metadata now includes child-process-tree attribution, but broader protocol/state attribution is still incomplete
 - WSL-aware sidebar git metadata refresh now exists, but it still depends on cwd updates and does not yet cover every runtime/source path
 - Shell integration scripts exist but are not yet fully connected end-to-end to sidebar state
 
