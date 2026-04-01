@@ -148,9 +148,9 @@ Current behavior:
 
 ### 5. Sidebar rename path and git metadata wiring tightened
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - sidebar-native rename rects and git metadata refresh
+- `4fcd4fbbd` - `feat(win32): tighten sidebar rename and git metadata`
 
 What landed in this slice:
 
