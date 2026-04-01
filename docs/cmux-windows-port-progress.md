@@ -222,9 +222,9 @@ Current behavior:
 
 ### 9. Sidebar polish and legacy-tab dependency reduced further
 
-Implemented in the current working tree on this branch:
+Implemented and committed in:
 
-- Working tree (pending commit) - sidebar GDI polish and fewer live tab-bar assumptions
+- `ed5379374` - `feat(win32): polish sidebar chrome`
 
 What landed in this slice:
 
