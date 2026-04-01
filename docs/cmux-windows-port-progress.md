@@ -183,6 +183,26 @@ Current behavior:
 - Existing sidebar git/PR metadata remains visible and is now grouped with shell metadata in a single rendered line
 - Shell metadata still reflects configured launch intent rather than per-workspace runtime detection, so WSL/native divergence is still incomplete
 
+### 7. Sidebar runtime detection promoted beyond config inference
+
+Implemented in the current working tree on this branch:
+
+- Working tree (pending commit) - runtime shell detection, WSL-aware git refresh, and first live ports
+
+What landed in this slice:
+
+- Updated `src/apprt/win32/Window.zig` to derive sidebar shell type from each live surface's exec argv instead of only from global config
+- Switched sidebar git / PR refresh to use WSL-aware command routing when the live workspace shell resolves to WSL
+- Added a first real Windows TCP listener scan in `src/cmux/git/PortScanner.zig`
+- Wired sidebar port metadata refresh to the live workspace process handle and sidebar state refresh path
+- Refreshed runtime sidebar metadata on workspace creation, cwd updates, and tab selection so the visible chrome stays closer to live process state
+
+Current behavior:
+
+- Sidebar shell labels now reflect the live workspace launch argv rather than only configured launch intent
+- Sidebar git branch / PR refresh now follows WSL command routing when the workspace shell is detected as WSL
+- Sidebar can now surface a first live set of interesting listening ports tied to the active workspace process on Windows, though process-tree and child-server ownership are still incomplete
+
 ## Verified environment notes
 
 ### Local tools added during port work
@@ -220,7 +240,7 @@ image or cross-compilation environment.
 ### Sidebar / workspace UI
 
 - Sidebar is still GDI fallback, not full Direct2D/DirectWrite quality
-- Sidebar metadata rendering now has slots for shell type, git branch, PR number, and ports; live population is still incomplete overall
+- Sidebar metadata rendering now has slots for shell type, git branch, PR number, and ports; runtime population is improved but still incomplete overall
 - Legacy top-tab assumptions still exist in parts of `Window.zig`
 - Sidebar-driven rename, reorder, and context menus now exist, but some focus/selection/layout paths still assume the legacy top tab bar
 
@@ -243,9 +263,9 @@ image or cross-compilation environment.
 
 ### Shell / metadata / integration
 
-- WSL/native shell detection and port metadata are not yet live in the sidebar
-- Sidebar shell metadata currently reflects configured command inference rather than true per-workspace runtime detection
-- Current git metadata refresh assumes native git invocation; WSL-aware sidebar metadata refresh is still pending
+- Sidebar shell metadata now uses live exec argv classification for active workspaces, but deeper runtime/process-tree detection is still incomplete
+- Sidebar port metadata now has a first live Windows listener scan, but only for directly owned process handles rather than full descendant trees
+- WSL-aware sidebar git metadata refresh now exists, but it still depends on cwd updates and does not yet cover every runtime/source path
 - Shell integration scripts exist but are not yet fully connected end-to-end to sidebar state
 
 ### Remote / SSH / teams workflows

@@ -3,6 +3,7 @@
 //! bar, tab switching, and window-level state (fullscreen, DPI scale).
 const Window = @This();
 
+const builtin = @import("builtin");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const apprt = @import("../../apprt.zig");
@@ -15,6 +16,8 @@ const Theme = @import("../../cmux/ui/Theme.zig").Theme;
 const SidebarTab = @import("../../cmux/ui/SidebarTab.zig");
 const Workspace = @import("../../cmux/workspace/Workspace.zig").Workspace;
 const GitStatus = @import("../../cmux/git/GitStatus.zig").GitStatus;
+const PortScanner = @import("../../cmux/git/PortScanner.zig").PortScanner;
+const ProcessInfo = @import("../../pty.zig").ProcessInfo;
 const w32 = @import("win32.zig");
 
 const log = std.log.scoped(.win32);
@@ -354,7 +357,7 @@ pub fn addTab(self: *Window) !*Surface {
         var title_buf: [64]u8 = undefined;
         const default_name = std.fmt.bufPrint(&title_buf, "Workspace {d}", .{pos + 1}) catch "Workspace";
         self.sidebar_tabs[pos] = SidebarTab.init(default_name);
-        self.sidebar_tabs[pos].shell_type = self.detectSidebarShellType();
+        self.refreshSidebarRuntimeMetadata(pos);
         self.sidebar_tabs[pos].is_active = (pos == self.active_tab);
         if (pos >= sidebar.tabs.items.len) {
             _ = sidebar.addTab(default_name) catch {};
@@ -371,11 +374,61 @@ pub fn addTab(self: *Window) !*Surface {
     return surface;
 }
 
-fn detectSidebarShellType(self: *const Window) SidebarTab.ShellType {
-    const command = self.app.config.command orelse return .cmd;
-    const command_string = command.string(self.app.core_app.alloc) catch return .custom;
-    defer self.app.core_app.alloc.free(command_string);
-    return Workspace.ShellType.fromCommand(command_string).toTabShellType();
+fn detectSidebarShellTypeFromSurface(self: *const Window, surface: *const Surface) SidebarTab.ShellType {
+    const backend = &surface.core_surface.io.backend;
+    return switch (backend.*) {
+        .exec => |*exec| blk: {
+            if (exec.subprocess.args.len == 0) break :blk .cmd;
+
+            const argv0 = std.mem.span(exec.subprocess.args[0]);
+            const last_sep = std.mem.lastIndexOfAny(u8, argv0, "/\\");
+            const basename = if (last_sep) |idx| argv0[idx + 1 ..] else argv0;
+            const shell_type = Workspace.ShellType.fromCommand(basename);
+
+            if (shell_type != .custom) break :blk shell_type.toTabShellType();
+
+            var joined = std.ArrayList(u8).init(self.app.core_app.alloc);
+            defer joined.deinit();
+            for (exec.subprocess.args, 0..) |arg, idx| {
+                if (idx > 0) joined.append(' ') catch break;
+                joined.appendSlice(std.mem.span(arg)) catch break;
+            }
+            break :blk Workspace.ShellType.fromCommand(joined.items).toTabShellType();
+        },
+    };
+}
+
+fn refreshSidebarRuntimeMetadata(self: *Window, tab_idx: usize) void {
+    if (tab_idx >= self.tab_count) return;
+    const surface = self.getTabActiveSurface(tab_idx) orelse return;
+    self.sidebar_tabs[tab_idx].shell_type = self.detectSidebarShellTypeFromSurface(surface);
+    self.refreshSidebarPortMetadata(tab_idx, surface);
+}
+
+fn refreshSidebarPortMetadata(self: *Window, tab_idx: usize, surface: *const Surface) void {
+    self.sidebar_tabs[tab_idx].clearPorts();
+
+    const port_owner_pid = switch (surface.core_surface.io.backend) {
+        .exec => |*exec| blk: {
+            if (exec.subprocess.process) |proc| switch (proc) {
+                .fork_exec => |cmd| {
+                    if (builtin.os.tag == .windows) {
+                        if (cmd.pid) |process_handle| {
+                            const pid = w32.GetProcessId(process_handle);
+                            if (pid != 0) break :blk pid;
+                        }
+                    }
+                },
+                .flatpak => {},
+            };
+            break :blk null;
+        },
+    };
+
+    var port_scanner = PortScanner.init(self.app.core_app.alloc);
+    const ports = port_scanner.scanInterestingPortsForPid(port_owner_pid) catch return;
+    defer self.app.core_app.alloc.free(ports);
+    for (ports) |port| self.sidebar_tabs[tab_idx].addPort(port);
 }
 
 /// Close a tab by surface pointer. Removes from the tab list,
@@ -523,6 +576,7 @@ pub fn selectTabIndex(self: *Window, idx: usize) void {
     if (surface.hwnd) |h| _ = w32.SetFocus(h);
     self.updateWindowTitle();
     if (self.sidebar) |*sidebar| {
+        self.refreshSidebarRuntimeMetadata(idx);
         for (0..self.tab_count) |i| {
             self.sidebar_tabs[i].is_active = (i == idx);
         }
@@ -1001,6 +1055,7 @@ pub fn addSidebarNotification(self: *Window, tab_idx: usize, text: []const u8) v
 pub fn setSidebarCwd(self: *Window, tab_idx: usize, cwd: []const u8) void {
     if (tab_idx >= self.tab_count) return;
     self.sidebar_tabs[tab_idx].setCwd(cwd);
+    self.refreshSidebarRuntimeMetadata(tab_idx);
     self.refreshSidebarGitMetadata(tab_idx);
     if (self.sidebar) |*sidebar| {
         sidebar.updateTab(tab_idx, self.sidebar_tabs[tab_idx]);
@@ -1016,8 +1071,9 @@ fn refreshSidebarGitMetadata(self: *Window, tab_idx: usize) void {
         return;
     }
 
+    const is_wsl = self.sidebar_tabs[tab_idx].shell_type == .wsl;
     var git_status = GitStatus.init(self.app.core_app.alloc);
-    const branch = git_status.getBranch(cwd, false) catch {
+    const branch = git_status.getBranch(cwd, is_wsl) catch {
         self.sidebar_tabs[tab_idx].setGitBranch("");
         self.sidebar_tabs[tab_idx].pr_number = 0;
         return;
@@ -1025,7 +1081,7 @@ fn refreshSidebarGitMetadata(self: *Window, tab_idx: usize) void {
     defer self.app.core_app.alloc.free(branch);
     self.sidebar_tabs[tab_idx].setGitBranch(branch);
 
-    const pr_status = git_status.getPrStatus(cwd, false) catch {
+    const pr_status = git_status.getPrStatus(cwd, is_wsl) catch {
         self.sidebar_tabs[tab_idx].pr_number = 0;
         return;
     };
